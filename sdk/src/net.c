@@ -1,0 +1,311 @@
+/*
+ * net.c - tiny polled IPv4 stack (ARP, ICMP echo, UDP)
+ *
+ * Every host we hear from is cached with its MAC and the switch port it
+ * came in on, so replies go out of that port only.  Unknown destinations
+ * are sent to the broadcast MAC on all ports (and an ARP request is sent
+ * so the next packet goes direct).
+ */
+#include "rtl8196c.h"
+#include "net.h"
+#include "swcore.h"
+#include "libc.h"
+
+struct arp_entry { uint8_t ip[4]; uint8_t mac[6]; uint8_t port; uint8_t valid; };
+
+static uint8_t our_mac[6], our_ip[4], alias_ip[4], active_ip[4];
+static uint8_t our_mask[4] = { 255, 255, 255, 0 };
+static uint8_t our_gw[4]   = { 192, 168, 0, 1 };
+static uint8_t our_dns[4]  = { 192, 168, 0, 1 };
+static struct arp_entry cache[NET_ARP_CACHE];
+static unsigned cache_next;
+static struct { uint16_t port; udp_handler_t h; } listeners[NET_MAX_UDP_LISTENERS];
+static uint8_t txf[1600];
+struct net_stats net_stats;
+
+uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
+void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+uint32_t rd32(const uint8_t *p) { return ((uint32_t)rd16(p) << 16) | rd16(p + 2); }
+void wr32(uint8_t *p, uint32_t v) { wr16(p, (uint16_t)(v >> 16)); wr16(p + 2, (uint16_t)v); }
+
+uint16_t net_l4_checksum(const uint8_t src[4], const uint8_t dst[4], uint8_t proto,
+                         const uint8_t *seg, uint32_t len)
+{
+    uint32_t seed = 0;
+    for (int i = 0; i < 4; i += 2) seed += rd16(src + i) + rd16(dst + i);
+    seed += proto + len;
+    return net_checksum(seg, len, seed);
+}
+
+void tcp_input(const uint8_t src_ip[4], const uint8_t *seg, uint32_t len);   /* tcp.c */
+void tcp_poll(void);
+
+uint16_t net_checksum(const uint8_t *p, uint32_t len, uint32_t seed)
+{
+    uint32_t sum = seed;
+    while (len > 1) { sum += rd16(p); p += 2; len -= 2; }
+    if (len) sum += (uint32_t)p[0] << 8;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+const uint8_t *net_ip(void)        { return our_ip; }
+const uint8_t *net_active_ip(void) { return active_ip; }
+void net_set_active_ip(const uint8_t ip[4]) { memcpy(active_ip, ip, 4); }
+const uint8_t *net_mac(void)       { return our_mac; }
+const uint8_t *net_netmask(void)   { return our_mask; }
+const uint8_t *net_gateway(void)   { return our_gw; }
+const uint8_t *net_dns(void)       { return our_dns; }
+void net_set_ip(const uint8_t ip[4])       { memcpy(our_ip, ip, 4); memcpy(active_ip, ip, 4); }
+void net_set_netmask(const uint8_t m[4])   { memcpy(our_mask, m, 4); }
+void net_set_gateway(const uint8_t gw[4])
+{
+    memcpy(our_gw, gw, 4);
+    if (gw[0] | gw[1] | gw[2] | gw[3])
+        net_arp_request(gw);
+}
+void net_set_dns(const uint8_t dns[4])     { memcpy(our_dns, dns, 4); }
+
+static int is_our_unicast(const uint8_t ip[4])
+{
+    if ((our_ip[0] | our_ip[1] | our_ip[2] | our_ip[3]) && memcmp(ip, our_ip, 4) == 0)
+        return 1;
+    if ((alias_ip[0] | alias_ip[1] | alias_ip[2] | alias_ip[3]) && memcmp(ip, alias_ip, 4) == 0)
+        return 1;
+    return 0;
+}
+
+static int is_broadcast_ip(const uint8_t ip[4])
+{
+    if (ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255)
+        return 1;
+    if (ip[3] == 255 && memcmp(ip, our_ip, 3) == 0)
+        return 1;
+    return 0;
+}
+
+static struct arp_entry *cache_find(const uint8_t ip[4])
+{
+    for (int i = 0; i < NET_ARP_CACHE; i++)
+        if (cache[i].valid && memcmp(cache[i].ip, ip, 4) == 0)
+            return &cache[i];
+    return 0;
+}
+
+static void cache_learn(const uint8_t ip[4], const uint8_t mac[6], int port)
+{
+    if ((ip[0] | ip[1] | ip[2] | ip[3]) == 0 || is_broadcast_ip(ip))
+        return;
+    struct arp_entry *e = cache_find(ip);
+    if (!e) {
+        e = &cache[cache_next];
+        cache_next = (cache_next + 1) % NET_ARP_CACHE;
+        memcpy(e->ip, ip, 4);
+        e->valid = 1;
+    }
+    memcpy(e->mac, mac, 6);
+    e->port = (uint8_t)port;
+}
+
+void net_init(const uint8_t mac[6], const uint8_t ip[4])
+{
+    memcpy(our_mac, mac, 6);
+    memcpy(our_ip, ip, 4);
+    memcpy(alias_ip, ip, 4);
+    memcpy(active_ip, ip, 4);
+    memset(cache, 0, sizeof cache);
+    memset(listeners, 0, sizeof listeners);
+    memset(&net_stats, 0, sizeof net_stats);
+    eth_init(mac);
+}
+
+int net_udp_listen(uint16_t port, udp_handler_t h)
+{
+    if (!h) {
+        for (int i = 0; i < NET_MAX_UDP_LISTENERS; i++)
+            if (listeners[i].port == port) {
+                listeners[i].port = 0;
+                listeners[i].h = 0;
+            }
+        return 0;
+    }
+    for (int i = 0; i < NET_MAX_UDP_LISTENERS; i++)
+        if (!listeners[i].h || listeners[i].port == port) {
+            listeners[i].port = port;
+            listeners[i].h = h;
+            return 0;
+        }
+    return -1;
+}
+
+static int send_frame(const uint8_t *dst_mac, int port, uint32_t len)
+{
+    memcpy(txf, dst_mac, 6);
+    memcpy(txf + 6, our_mac, 6);
+    int r = eth_send(txf, len, port < 0 ? ALL_PORT_MASK : (uint8_t)(1u << port));
+    if (r == 0) net_stats.tx++;
+    return r;
+}
+
+void net_arp_request(const uint8_t ip[4])
+{
+    wr16(txf + 12, 0x0806);
+    uint8_t *a = txf + 14;
+    wr16(a, 1); wr16(a + 2, 0x0800); a[4] = 6; a[5] = 4; wr16(a + 6, 1);
+    memcpy(a + 8, our_mac, 6);
+    memcpy(a + 14, our_ip, 4);
+    memset(a + 18, 0, 6);
+    memcpy(a + 24, ip, 4);
+    static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    send_frame(bcast, -1, 42);
+    net_stats.arp_req++;
+}
+
+int net_ip_send(const uint8_t dst_ip[4], uint8_t proto, const uint8_t *payload, uint32_t len)
+{
+    if (len > 1480) return -1;
+    static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    int bcast_dst = is_broadcast_ip(dst_ip);
+    const uint8_t *nexthop = dst_ip;
+    if (!bcast_dst && (our_ip[0] | our_ip[1] | our_ip[2] | our_ip[3]) &&
+        (our_gw[0] | our_gw[1] | our_gw[2] | our_gw[3])) {
+        if (((rd32(dst_ip) ^ rd32(our_ip)) & rd32(our_mask)) != 0)
+            nexthop = our_gw;
+    }
+    struct arp_entry *e = bcast_dst ? 0 : cache_find(nexthop);
+    if (!e && !bcast_dst) {
+        net_arp_request(nexthop);
+        for (int tries = 0; tries < 2000 && !e; tries++) {
+            net_poll();
+            e = cache_find(nexthop);
+        }
+    }
+    const uint8_t *dmac = e ? e->mac : bcast;
+    int port = e ? e->port : -1;
+    static uint16_t ip_id;
+
+    wr16(txf + 12, 0x0800);
+    uint8_t *ip = txf + 14;
+    uint32_t total = 20 + len;
+    ip[0] = 0x45; ip[1] = 0;
+    wr16(ip + 2, (uint16_t)total);
+    wr16(ip + 4, ip_id++); wr16(ip + 6, 0x4000);   /* DF */
+    ip[8] = 64; ip[9] = proto;
+    wr16(ip + 10, 0);
+    memcpy(ip + 12, active_ip, 4);
+    memcpy(ip + 16, dst_ip, 4);
+    wr16(ip + 10, net_checksum(ip, 20, 0));
+    memcpy(ip + 20, payload, len);
+    int r = send_frame(dmac, port, 14 + total);
+    return r;
+}
+
+int net_udp_send(const uint8_t dst_ip[4], uint16_t src_port, uint16_t dst_port, const void *data, uint32_t len)
+{
+    static uint8_t seg[1480];
+    if (len > 1472) return -1;
+    wr16(seg, src_port); wr16(seg + 2, dst_port);
+    wr16(seg + 4, (uint16_t)(8 + len));
+    wr16(seg + 6, 0);
+    memcpy(seg + 8, data, len);
+    uint16_t c = net_l4_checksum(active_ip, dst_ip, 17, seg, 8 + len);
+    wr16(seg + 6, c ? c : 0xFFFF);
+    int r = net_ip_send(dst_ip, 17, seg, 8 + len);
+    if (r == 0) net_stats.udp_tx++;
+    return r;
+}
+
+static void handle_arp(const uint8_t *f, uint32_t len, int port)
+{
+    const uint8_t *a = f + 14;
+    if (len < 42 || rd16(a) != 1 || rd16(a + 2) != 0x0800) return;
+    uint16_t opc = rd16(a + 6);
+    if (!is_our_unicast(a + 14))                    /* learn anybody who talks about themselves */
+        cache_learn(a + 14, a + 8, port);
+    if (opc == 2) {
+        if (is_our_unicast(a + 24)) net_stats.arp_reply_rcvd++;
+        return;
+    }
+    if (opc != 1 || !is_our_unicast(a + 24)) return;
+    wr16(txf + 12, 0x0806);
+    uint8_t *r = txf + 14;
+    wr16(r, 1); wr16(r + 2, 0x0800); r[4] = 6; r[5] = 4; wr16(r + 6, 2);
+    memcpy(r + 8, our_mac, 6);
+    memcpy(r + 14, a + 24, 4);                      /* answer with whichever IP (our_ip or alias_ip) was queried */
+    memcpy(r + 18, a + 8, 10);
+    if (send_frame(f + 6, port, 42) == 0) net_stats.arp_reply_sent++;
+}
+
+static void handle_icmp(const uint8_t *f, const uint8_t *ip, uint32_t ihl, uint32_t total, int port)
+{
+    const uint8_t *icmp = ip + ihl;
+    if (icmp[0] != 8) return;
+    wr16(txf + 12, 0x0800);
+    uint8_t *oip = txf + 14;
+    memcpy(oip, ip, total);
+    memcpy(oip + 12, ip + 16, 4);                   /* reply from the queried IP */
+    memcpy(oip + 16, ip + 12, 4);
+    oip[8] = 64;
+    wr16(oip + 10, 0);
+    wr16(oip + 10, net_checksum(oip, ihl, 0));
+    uint8_t *oicmp = oip + ihl;
+    oicmp[0] = 0;
+    wr16(oicmp + 2, 0);
+    wr16(oicmp + 2, net_checksum(oicmp, total - ihl, 0));
+    if (send_frame(f + 6, port, 14 + total) == 0) net_stats.icmp_echo++;
+}
+
+static void handle_udp(const uint8_t *ip, uint32_t ihl, uint32_t total)
+{
+    const uint8_t *udp = ip + ihl;
+    if (total < ihl + 8) return;
+    uint16_t sport = rd16(udp), dport = rd16(udp + 2), ulen = rd16(udp + 4);
+    if (ulen < 8 || ulen > total - ihl) return;
+    net_stats.udp_rx++;
+    for (int i = 0; i < NET_MAX_UDP_LISTENERS; i++)
+        if (listeners[i].h && listeners[i].port == dport) {
+            listeners[i].h(ip + 12, sport, dport, udp + 8, ulen - 8);
+            return;
+        }
+    net_stats.udp_nolistener++;
+}
+
+static void handle_ip(const uint8_t *f, uint32_t len, int port)
+{
+    const uint8_t *ip = f + 14;
+    if (len < 34 || (ip[0] >> 4) != 4) return;
+    uint32_t ihl = (ip[0] & 0xF) * 4;
+    uint32_t total = rd16(ip + 2);
+    if (ihl < 20 || total < ihl || total + 14 > len) return;
+    int for_us = is_our_unicast(ip + 16) || is_broadcast_ip(ip + 16);
+    /* Also allow unicast DHCP replies on UDP port 68 before our_ip is updated */
+    if (!for_us && ip[9] == 17 && total >= ihl + 8 && rd16(ip + ihl + 2) == 68)
+        for_us = 1;
+    if (!for_us) return;
+    if (is_our_unicast(ip + 16))
+        memcpy(active_ip, ip + 16, 4);
+    else
+        memcpy(active_ip, our_ip, 4);
+    cache_learn(ip + 12, f + 6, port);
+    if (ip[9] == 1) handle_icmp(f, ip, ihl, total, port);
+    else if (ip[9] == 17) handle_udp(ip, ihl, total);
+    else if (ip[9] == 6) tcp_input(ip + 12, ip + ihl, total - ihl);
+    memcpy(active_ip, our_ip, 4);
+}
+
+void net_poll(void)
+{
+    uint8_t *f; uint32_t len; int port;
+    while (eth_recv(&f, &len, &port)) {
+        net_stats.rx++;
+        if (len >= 14) {
+            uint16_t type = rd16(f + 12);
+            if (type == 0x0806) handle_arp(f, len, port);
+            else if (type == 0x0800) handle_ip(f, len, port);
+            else net_stats.dropped++;
+        }
+        eth_recv_done();
+    }
+    tcp_poll();
+    eth_tx_reclaim();
+}
