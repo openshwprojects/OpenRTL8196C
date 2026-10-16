@@ -96,6 +96,7 @@ int main(void)
     printf("radio up, our MAC %02x:%02x:%02x:%02x:%02x:%02x\n", dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
 
     uint32_t t0 = micros();
+    wl_sta_trace = 1;                                        /* show the first received frames in this demo */
     wl_sta_start(&dev, DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASS);
     printf("PMK derived in %u ms, scanning\n", elapsed_us(t0) / 1000u);
     static const uint8_t zero_ip[4] = { 0, 0, 0, 0 };
@@ -124,7 +125,12 @@ int main(void)
                                                      s->secured ? ", WPA2 keys installed" : "", s->gtk_len, s->gtk_id);
             if (s->state == WL_STA_FAILED) printf(": %s", s->fail_reason);
             printf("\n");
-            if (s->state == WL_STA_CONNECTED && !dhcp_started) { dhcp_start("OpenRTL8196C"); dhcp_started = 1; }
+            if (s->state == WL_STA_CONNECTED && !dhcp_started) {
+                /* unicast-reception test: the ARP reply from the gateway comes back encrypted and unicast */
+                static const uint8_t gw_guess[4] = { 192, 168, 0, 1 };
+                net_arp_request(gw_guess);
+                dhcp_start("OpenRTL8196C"); dhcp_started = 1;
+            }
             if (s->state != WL_STA_CONNECTED) { dhcp_started = 0; bound_printed = 0; }
             last_state = s->state;
         }
@@ -139,11 +145,12 @@ int main(void)
         }
         if (dns_sent && !dns_answered && timer_ms() - last > 3000u && dns_sent < 5) send_dns_query();
         if (timer_ms() - last >= 5000u) {
-            printf("alive: %s, data in %u (uni %u bc %u) out %u drop %u, eapol %u/%u, retries %u, tx fail %u, "
-                   "dhcp state %u, net rx %u tx %u udp rx %u, dns %s, http %u\n",
-                   wl_sta_state_name(s->state), s->data_rx, s->rx_unicast, s->rx_bcast, s->data_tx, s->rx_drop,
-                   s->eapol_rx, s->eapol_tx, s->retries, s->tx_fail, dhcp_info()->state, net_stats.rx, net_stats.tx,
-                   net_stats.udp_rx, dns_result, httpd_requests);
+            printf("alive: %s, data in %u (uni %u bc %u undec %u) out %u drop %u, eapol %u/%u, tx fail %u, "
+                   "dhcp state %u, net rx %u tx %u udp rx %u arp replies %u, dns %s, http %u\n",
+                   wl_sta_state_name(s->state), s->data_rx, s->rx_unicast, s->rx_bcast, s->rx_undecrypted, s->data_tx,
+                   s->rx_drop, s->eapol_rx, s->eapol_tx, s->tx_fail, dhcp_info()->state, net_stats.rx, net_stats.tx,
+                   net_stats.udp_rx, net_stats.arp_reply_rcvd, dns_result, httpd_requests);
+            if (dhcp_started && !dhcp_bound() && timer_ms() - last > 20000u) { net_arp_request((const uint8_t[]){ 192, 168, 0, 1 }); }
             last = timer_ms();
         }
     }

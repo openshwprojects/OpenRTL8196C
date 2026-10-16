@@ -31,6 +31,7 @@ struct wl_sta_info {
     const char *fail_reason;
     uint32_t data_rx, data_tx, tx_fail, rx_drop, eapol_rx, eapol_tx, retries;
     uint32_t rx_unicast, rx_bcast;  /* decrypted data frames addressed to us / to broadcast-multicast */
+    uint32_t rx_undecrypted;        /* protected frames whose payload did not decrypt (RCR accepts ICV errors) */
     uint8_t  ap_group_cipher, ap_pair_ccmp, ap_pair_tkip;   /* from the AP's RSN element (4 = CCMP, 2 = TKIP) */
     uint8_t  gtk_len, gtk_id;       /* from handshake message 3 */
 };

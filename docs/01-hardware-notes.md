@@ -349,8 +349,11 @@ decryption verified on the bench; TX side under test]:
   decrypt, TX/RX broadcast use the default key).
 - TX: driver inserts the 8-byte CCMP header (PN0 PN1 00 0x20|keyid<<6
   PN2..PN5) after the MAC header, sets the Protected bit and TX descriptor
-  w1 bits 23:22 = 3; the chip encrypts and appends the 8-byte MIC. RX: the
-  chip decrypts in place; the frame still carries the header and MIC.
+  w1 bits 23:22 = 3; the chip encrypts and appends the 8-byte MIC. RX
+  [measured]: the chip decrypts in place and **strips the MIC**; the frame
+  still carries the 8-byte CCMP header, so the payload starts at header+8
+  and runs to the end of the frame (minus FCS). Verified by a WPA2 station
+  getting DHCP, ARP and DNS through a D-Link AP.
 
 ## 7. Ethernet switch and CPU port [measured, examples/08, 09, 94, 95]
 

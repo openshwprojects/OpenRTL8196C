@@ -78,9 +78,11 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 24_wifi_fw | Wi-Fi step 1: RTL8192CE power-on and firmware start (needs `tools/extract_wifi_blobs.py` run on your own flash backup; the firmware is never committed) |
 | 25_wifi_scan | Wi-Fi step 2: passive scan of channels 1-13, receive only. Lists networks heard (BSSID, SSID, channel, signal, security); same blob requirement as 24 |
 | 26_wifi_active | Wi-Fi step 3: active scan. Sends broadcast probe requests (first on-air TX) and collects probe responses + beacons (`sdk/src/wl.c`) |
-| 27_wifi_sta | Wi-Fi: station demo, joins an access point (open, and WPA2 via the 4-way handshake). Credentials in git-ignored `wifi_config.h` |
+| 27_wifi_sta | **Working**: Wi-Fi station. Joins a WPA2-PSK (or open) network, 4-way handshake, hardware AES-CCMP, DHCP client, DNS through the router, SDK web page on the Wi-Fi address (`wl_sta.c`, `wpa_crypto.c`). Credentials in git-ignored `wifi_config.h` |
 | 28_wifi_ap | Wi-Fi: soft-AP demo, beacons an open test network and answers probe/auth/association |
 | 29_wifi_ap_http | **Working**: open Wi-Fi AP with DHCP, captive DNS and the SDK web server at http://192.168.4.1/ (`wl_ap.c`, `dhcpd.c`, `dnsd.c`); a PC joins and gets the page over the air |
+
+Wi-Fi state, code map, hardware gotchas and the plan for OpenBeken over Wi-Fi: `docs/05-wifi-handover.md`.
 
 The experiments that measured the undocumented bits live in `probes/`
 (timer layout, exception vector, interrupt routing, the Ethernet receive
@@ -115,6 +117,10 @@ sdk/src/fat.c                read-only FAT12/16/32 with long file names
 sdk/src/ntfs.c               read-only NTFS (MBR/GPT, fragmented and sparse files, attribute lists, UTF-8 names)
 sdk/src/pcie.c               PCIe root port: stock bring-up sequence, BAR2 window at 0xB9000000, power down
 sdk/src/wl.c                 RTL8192CE Wi-Fi driver: MAC/BB/RF bring-up, firmware, fuse read, TX/RX rings, channel, op-mode
+sdk/src/wl_ap.c              soft AP: beacons, probe/auth/assoc, client table, 802.11 <-> Ethernet bridge for net.c
+sdk/src/wl_sta.c             station: scan, auth/assoc, WPA2 4-way handshake, CCMP keys in the chip, bridge for net.c
+sdk/src/wpa_crypto.c         SHA-1, HMAC, PBKDF2, 802.11i PRF, AES-128, RFC 3394 unwrap (host-tested, tools/host_tests)
+sdk/src/dhcpd.c dnsd.c       tiny DHCP server and captive DNS for the AP
 sdk/src/diskio_usb.c         FatFs disk glue for USB mass storage (sdk/third_party/fatfs: read/write FAT + exFAT)
 sdk/rtl8196c.ld              link script (load at 0xA0500000, uncached)
 ```

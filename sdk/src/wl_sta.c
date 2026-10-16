@@ -41,7 +41,7 @@ static uint32_t tx_pn_lo, tx_pn_hi;                         /* CCMP packet numbe
 static uint8_t rxq[RXQ][1600];
 static uint32_t rxq_len[RXQ], rxq_head, rxq_tail;
 
-int wl_sta_trace = 1;
+int wl_sta_trace = 0;         /* set to 1 to print the first received data frames */
 
 static const char *const state_names[] = { "idle", "scanning", "authenticating", "associating", "handshake",
                                            "connected", "failed" };
@@ -222,6 +222,7 @@ static void install_keys(const uint8_t *gtk, uint32_t gtk_len, uint32_t gtk_id)
     if (gtk_len >= 16) cam_write(gtk_id, bcast, gtk, gtk_id, CAM_AES);
     wl_wr8(dev, 0x101, wl_rd8(dev, 0x101) | 0x02);          /* CR: security engine */
     wl_wr8(dev, REG_SECCFG, 0x0C | 0xC0);                   /* TXENC, RXDEC, TX/RX broadcast use default key */
+    if (wl_sta_trace) wl_wr32(dev, 0x608, wl_rd32(dev, 0x608) | (1u << 9));   /* RCR AICV: deliver undecryptable frames too (diagnostic) */
     tx_pn_lo = 0; tx_pn_hi = 0;
     info.secured = 1;
 }
@@ -322,11 +323,16 @@ static void on_data(const uint8_t *f, uint32_t len)
     if (memcmp(f + 4, dev->mac, 6) != 0 && !(f[4] & 1)) return;      /* to us or broadcast */
     uint32_t hl = 24 + ((fc0 & 0x80) ? 2 : 0);                      /* QoS data: 2 more header bytes */
     if ((fc0 & 0xF0) == 0x40 || (fc0 & 0xF0) == 0xC0) return;        /* null data */
+    /* protected frames keep their 8-byte CCMP header; the chip strips the MIC
+     * (measured: ARP arrived as 20 bytes when 8 were subtracted for a MIC) */
     uint32_t tail = 0;
-    if (fc1 & 0x40) { hl += 8; tail = 8; }                          /* CCMP header + MIC */
+    if (fc1 & 0x40) hl += 8;
     if (len < hl + 8 + tail) { info.rx_drop++; return; }
     const uint8_t *llc = f + hl;
-    if (!(llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03)) { info.rx_drop++; return; }
+    if (!(llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03)) {
+        if (fc1 & 0x40) info.rx_undecrypted++; else info.rx_drop++;
+        return;
+    }
     uint32_t plen = len - hl - 8 - tail;
     uint16_t type = (uint16_t)((llc[6] << 8) | llc[7]);
     if (f[4] & 1) info.rx_bcast++; else info.rx_unicast++;
@@ -337,8 +343,8 @@ static void on_data(const uint8_t *f, uint32_t len)
             const uint8_t *p = llc + 8;
             printf("sta rx: %s %s type %04x len %u", (f[4] & 1) ? "bcast" : "UNICAST", (fc1 & 0x40) ? "enc" : "clear",
                    type, plen);
-            if (type == 0x0800 && plen >= 20) printf(" IP %u.%u.%u.%u -> %u.%u.%u.%u proto %u", p[12], p[13], p[14], p[15],
-                                                     p[16], p[17], p[18], p[19], p[9]);
+            if (type == 0x0800 && plen >= 20) printf(" IP %u.%u.%u.%u -> %u.%u.%u.%u proto %u (IP total %u)", p[12], p[13],
+                                                     p[14], p[15], p[16], p[17], p[18], p[19], p[9], (p[2] << 8) | p[3]);
             if (type == 0x0806 && plen >= 28) printf(" ARP %u.%u.%u.%u asks %u.%u.%u.%u", p[14], p[15], p[16], p[17], p[24],
                                                      p[25], p[26], p[27]);
             printf("\n");

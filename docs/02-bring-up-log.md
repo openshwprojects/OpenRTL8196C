@@ -617,3 +617,18 @@ Ported OpenBeken (`C:\GIT\OpenBK7231T_App`) to the RTL8196C:
   Fix for the future: `uart_esc_reboot_poll()` in uart.c; the Wi-Fi examples
   call it, so the ESC flood from flash.py reboots a running board into the
   loader by itself.
+- **MILESTONE: station mode works end to end** (examples/27_wifi_sta): WPA2
+  handshake 671 ms after boot, ARP reply from the gateway received (unicast,
+  chip-decrypted), DHCP lease 192.168.0.236 from the network, DNS lookup of
+  example.com answered through the router (104.20.23.154), SDK web page
+  served on the Wi-Fi address. 0 undecryptable frames, 0 drops.
+- The DHCP bug: the chip STRIPS the 8-byte CCMP MIC from decrypted frames;
+  subtracting it again made every IP frame 8 bytes shorter than its header
+  claimed and net.c dropped them (`udp rx 0`). ARP arriving as 20 bytes
+  instead of 28 gave it away. The CCMP header (8 bytes) stays in the frame.
+- Unicast reception had looked dead only because the first run had no
+  reason to receive unicast (the OFFER came back as a broadcast and was
+  then dropped by the length bug); ARP-probing the gateway proved it fine.
+- Diagnostics still in the build: RCR AICV (undecryptable frames delivered
+  and counted), `wl_sta_trace` prints the first 8 data frames. Remove or
+  default off once the code settles.
