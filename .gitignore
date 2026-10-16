@@ -1,6 +1,11 @@
 build/
 toolchain/
 backups/
+# Realtek Wi-Fi firmware generated from the user's flash backup (tools/extract_wifi_blobs.py)
+examples/*/wifi_fw.inc
+examples/*/wifi_blobs.inc
+# local Wi-Fi credentials for the STA demo (never committed)
+examples/*/wifi_config.h
 *.log
 __pycache__/
 *.pyc

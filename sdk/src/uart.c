@@ -3,6 +3,7 @@
  */
 #include "rtl8196c.h"
 #include "uart.h"
+#include "timer.h"                   /* wdt_reboot, for uart_esc_reboot_poll */
 
 void uart_init(void)
 {
@@ -43,6 +44,16 @@ void uart_puts(const char *s)
 {
     while (*s)
         uart_putc(*s++);
+}
+
+int uart_esc_reboot_poll(void)
+{
+    int c = uart_getc_nb();
+    if (c == 0x1B) {
+        uart_puts("\r\nESC on UART: rebooting to the loader\r\n");
+        wdt_reboot();
+    }
+    return c;
 }
 
 int uart_getc_nb(void)

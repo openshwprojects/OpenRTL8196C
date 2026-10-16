@@ -222,6 +222,136 @@ Measured on our board (2026-10-15):
 - An SD card reader was never detected (no connect at all) while a
   high-speed pendrive is, so the reader itself is the suspect.
 
+## 6c. PCIe and the Wi-Fi chip [measured, examples/23_pcie_probe]
+
+One PCIe root port. The bring-up sequence was disassembled from the stock
+kernel's `PCIE_reset_procedure` (kernel offset 0x80138f94; flash backup,
+LZMA kernel at flash 0x12C18) and works as is:
+
+| Step | Register | Value |
+|------|----------|-------|
+| clock on | `0xB8000010` (CLK_MANAGE) | bit 11 set, 100 ms |
+| PHY MDIO reset / load | `0xB8000050` | 8, 9, 0xB |
+| PHY reset + LTSSM enable | `0xB8B01008` | 1, then 0x81 |
+| PHY parameters | `0xB8B01000` = `reg<<8 \| val<<16 \| 1` | set B, because `0xB8000000` reads `80000002` on this board ("96C - 40MHz Clock Source") |
+| device reset | `0xB8000010` bit 12 (PERST) | low 300 ms, PHY reset again, high |
+| link | `0xB8B00728 & 0x1F` | `0x11` = L0 (up at once on this board) |
+| root port enable | `0xB8B00004` | `0x00100007` |
+| power down | `0xB8B10044` D3hot, MDIO reg 15 = 0x708, clock bit 11 off | |
+
+Root port config space at `0xB8B00000` (`10ec:8196`, class 0604), device
+config space at `0xB8B10000` (32-bit reads come back in normal order).
+
+Attached device: **`10ec:8191` rev 01, class 0280: RTL8192CE family**
+(RTL8188CE / RTL8188RE / RTL8192CE, 802.11n 2.4 GHz). It has BAR0 (I/O),
+BAR2 (64-bit memory), and the PM, MSI and PCIe capabilities. The stock
+firmware drives it with Realtek's `rtl8192cd` driver (firmware built into
+the kernel).
+
+Chip registers: the stock driver sets BAR2 = `0x19000000`, so chip
+register N is at **`0xB9000000 + N`**. Words read in normal order, with no
+swap, same as config space. Checked against SYS_CFG's clock-valid bits and
+`0x0A` = `0x20` (autoload from efuse OK).
+
+The variant check is the stock `check_chipID` (kernel 0x8015ba00):
+- SYS_CFG (`0xF0`) bit 27 set means 92C (2T2R);
+- otherwise 88C (1T1R), and HPON_FSM (`0xEC`) `>>22 & 3 == 1` means 88R
+  (high power);
+- bit 23 marks a test chip.
+
+On this board SYS_CFG = `08400339` and HPON_FSM = `98053f15`. **The chip is
+an RTL8192CE, 2T2R** (two transmit and two receive paths), A-cut (bits
+12-15 = 0), a normal production chip (bit 23 clear), TSMC (bit 19 clear),
+with no 1T2R bonding (`0xEC` bits 22-23 = 0).
+
+Access width [measured, examples/24_wifi_fw]: 8-, 16- and 32-bit accesses
+at `0xB9000000 + reg` all hit the right bytes (little-endian register
+numbering, no address XOR). Firmware start [measured] uses the rtlwifi
+sequence:
+1. power-on: RSV_CTRL 0, SPS0 0x2B, XTAL 0x0F, set APS_FSMCO bit 8 and
+   wait for it to clear, then APS_FSMCO = 0x1012, ISO+1 = 0x82, CR = 0x02FF;
+2. firmware download: FEN_CPUEN, MCUFWDL_EN, 4 KB pages (page number in
+   MCUFWDL+2 bits 0-2) written as little-endian words at chip address
+   0x1000;
+3. wait for FWDL_CHKSUM_RPT, set MCUFWDL_RDY, wait for WINTINI_RDY.
+
+With stock firmware 92c2 v69.0 (11,615 bytes) the download takes 17 ms and
+the firmware runs 5 ms later (MCUFWDL `000200c6`).
+
+**Receive path** [measured, examples/25_wifi_scan, passive scan works]:
+- Bring-up order as Linux `rtl92ce_hw_init`:
+  1. power-on, LLT, DMA ring addresses;
+  2. firmware;
+  3. MAC table (byte writes);
+  4. baseband: SYS_FUNC_EN |= bits 13/1/0, **AFE PLL `0x28` = 0x83 and
+     `0x29` = 0xDB** (ADC/DAC clock; without it decoding is erratic),
+     RF_CTRL = 7, SYS_FUNC_EN = 0xE3, XTAL+1 = 0x80, LEDCFG0 bit 23;
+  5. tables: PHY_REG 2T, then the 2-row RX fix, then AGC;
+  6. RF paths A and B through the 3-wire interface (0x840/0x844, with the
+     RFENV save/restore in 0x870);
+  7. CCK/OFDM enable bits in `0x800`, LC calibration, 20 MHz;
+  8. the channel is the low 10 bits of RF register 0x18.
+- **CR bit 6 (MACTXEN) must stay set.** With it clear the MAC receives
+  nothing at all; frames already buffered still drain, which looks like
+  "4 frames, then silence". For a listen-only setup, keep TXPAUSE = 0xFF and
+  never hand over a TX descriptor. Also set a MAC address (`0x610`); the
+  reset value is 00:00:00:00:00:00.
+- Interrupt registers are **HIMR `0x120`, HISR `0x124`, HIMRE `0x128`,
+  HISRE `0x12C`**. `0x44` is GPIO_PIN_CTRL: writing 0xFFFFFFFF there (an
+  old 92S-style HISR address) turns every Wi-Fi-chip GPIO into a high
+  output.
+- RX descriptor (32 bytes, little-endian words): w0 holds the length (bits
+  0-13), CRC error (bit 14), drv_info size in units of 8 bytes (bits 16-19),
+  shift (bits 24-25), EOR (bit 30) and OWN (bit 31); w3 bits 0-5 hold the
+  rate; w5 holds the TSF; w6 the buffer address. The buffer holds drv_info
+  (32 bytes of PHY status: OFDM `pwdb_all` at byte 4, CCK AGC report at byte
+  5), then the 802.11 frame with its FCS. Bit 26 (PHY status) stays 0 even
+  when drv_info is present.
+- Path B's RF read-back is unreliable (register 0x18 returns other
+  registers' values); writes work. The channel word is shared from path A.
+- Stock 40 MHz-board PCIe tuning (applied in example 25): root-port PHY
+  MDIO register 15 = 0x0F0F; Wi-Fi EPHY registers 4/5/3 = 0xC940/0x4270/
+  0x019E, written through `0x354` (data) and `0x358` (0x20 | register);
+  RC `0x78` = EP `0x78` & 0x1F.
+- The baseband CRC counters (`0xF84` CCK, `0xF94` OFDM) were what showed
+  that the radio worked while the MAC dropped frames.
+
+**Transmit and AP mode** [measured, examples/26, 29, sdk/src/wl.c]:
+- TX descriptors (64-byte stride, 40 used) must be chained into a circular
+  list through word 10 (next-descriptor address); the engine stops after one
+  frame otherwise. Kick a queue with `0x300` = `1 << queue` (BE = bit 1,
+  beacon = bit 4). Management frames: queue_sel 0x12, data 0x00, beacon
+  0x10; rate_id 0xC; set BMC (w0 bit 24) for multicast destinations.
+- RCR needs **ADF** (bit 11) to receive data frames and ACF (bit 12) for
+  control frames; AMF alone passes only management.
+- AP mode (MSR = 3) stalls every TX queue unless `0x554` (beacon interval)
+  is set and a beacon descriptor is armed. The beacon descriptor at
+  `REG_BCNQ_DESA` is persistent: the MAC sends it at each TBTT, sets HISR
+  TBDOK (bit 9) and BCNINT (bit 13), and never clears OWN; refill it after
+  BCNINT. `TDECTRL[31:24]` counts TBTTs.
+- `REG_USTIME_TSF` (0x55C) uses its low 6 bits as MAC clocks per
+  microsecond; this board's MAC clock is **40 MHz**, so 0x28 gives a 1 us
+  TSF (0x50 is wrong here: it reads as 16 and the TSF runs 2.5x fast).
+- Received data from stations: ToDS frames, header 24 bytes (26 with QoS),
+  then LLC/SNAP `AA AA 03 00 00 00` + ethertype; Ethernet dst = addr3,
+  src = addr2.
+
+**Hardware encryption (AES-CCMP)** [from the Linux driver, handshake and RX
+decryption verified on the bench; TX side under test]:
+- Key table ("CAM") at `0x670` (command) / `0x674` (write data): 32 entries
+  of 8 dwords. Dword 0 = `mac[1]<<24 | mac[0]<<16 | config`, dword 1 =
+  `mac[5..2]`, dwords 2-5 = the 128-bit key little-endian, 6-7 zero. Write
+  each dword to `0x674`, then `0x670 = BIT31 | BIT16 | (entry*8 + i)`, from
+  i = 7 down to 0. Config = `BIT15 (valid) | alg<<2 | keyid`, alg 4 = AES.
+  Pairwise key: entry 4, key id 0, MAC = the peer. Group key: entry =
+  key id (1..3), MAC = broadcast. `0x670 = BIT31|BIT30` clears all.
+- Enable: CR+1 (`0x101`) |= 0x02, SECCFG (`0x680`) = 0xCC (TX encrypt, RX
+  decrypt, TX/RX broadcast use the default key).
+- TX: driver inserts the 8-byte CCMP header (PN0 PN1 00 0x20|keyid<<6
+  PN2..PN5) after the MAC header, sets the Protected bit and TX descriptor
+  w1 bits 23:22 = 3; the chip encrypts and appends the 8-byte MIC. RX: the
+  chip decrypts in place; the frame still carries the header and MIC.
+
 ## 7. Ethernet switch and CPU port [measured, examples/08, 09, 94, 95]
 
 The switch core lives at 0xBB800000 (register names from Realtek's

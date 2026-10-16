@@ -435,3 +435,185 @@ Ported OpenBeken (`C:\GIT\OpenBK7231T_App`) to the RTL8196C:
   PC comparison (`tools/fat_crc.py D:\ --compare backups/stick2_ntfs.log`):
   **104 files identical, 0 different**. The other 2 board files are in
   `System Volume Information`, which Windows does not let a normal user list.
+- **Write path verified with FatFs** on an SD card (Genesys `05e3:0751`
+  reader, 942 MB, FAT16 with 32 KB clusters), examples/21_usb_fatfs:
+  - raw 64 KB write near the end of the card, read back, original restored;
+  - 1 MB `/rtltest/pattern.bin` written (1.6 MB/s, the card's write speed:
+    the raw write runs at about 1.3 MB/s too), read back and compared
+    (5.9 MB/s), 200 random-offset reads, crc32 `dea398b5`;
+  - `hello.txt` created, appended with UTF-8 text, renamed and renamed back.
+
+  RESULT: ALL OK. 668 commands, 0 retries, 0 bulk errors, 0 residue,
+  9 commands with "failed" status that the code treats as handled.
+
+## 2026-10-16 - PCIe and the Wi-Fi chip
+
+- Unpacked the stock firmware offline (LZMA kernel at flash 0x12C18, linked
+  at 0x80000000). Its strings show the `rtl8192cd` Wi-Fi driver for
+  RTL8192C/8188C/8188R. The code that prints "i=%x Cannot LinkUP" led to
+  `PCIE_reset_procedure` (0x80138f94) and the power-down routine after it.
+  Both were disassembled into examples/23_pcie_probe.
+- On the board: system id `0xB8000000` = `80000002`, so PHY parameter set B
+  ("40MHz clock source"). The link reached L0 at once. Root port is
+  `10ec:8196`; the device is **`10ec:8191` rev 01, class 0280: RTL8192CE
+  family**, with BAR0 I/O, BAR2 64-bit memory, and PM, MSI and PCIe
+  capabilities. The port was powered down afterwards. See hardware notes
+  section 6c.
+- Chip variant: BAR2 = `0x19000000` (stock mapping, registers at
+  `0xB9000000`). SYS_CFG `08400339` has bit 27 set, so it is an **RTL8192CE,
+  2T2R**, A-cut production chip. HPON_FSM is `98053f15`. The decoding
+  follows the stock `check_chipID` at kernel 0x8015ba00. Byte order: words
+  arrive unswapped (the clock-valid bits and `0x0A` = `0x20` make sense only
+  that way).
+- **Wi-Fi step 1 done** (examples/24_wifi_fw, `sdk/src/pcie.c`).
+  - `tools/extract_wifi_blobs.py` unpacks 3 firmware images and 20 register
+    tables from the stock kernel into the git-ignored `backups/wifi/`.
+  - Narrow accesses through the PCIe bridge need no address XOR.
+  - MAC power-on: the state machine finishes in 22 polls; CR goes from
+    `eaea` to `02ff`.
+  - Firmware 92c2 v69 downloaded in 17 ms; checksum OK; WINTINI_RDY 5 ms
+    later.
+  - Nothing transmitted; PCIe powered down after the test.
+- **Wi-Fi step 2: passive scan works** (examples/25_wifi_scan). Two passes
+  over channels 1-13: 355 frames, 7 networks with SSID, channel, signal
+  (-26 to -94 dBm) and security. Nothing is queued for transmit. How it was
+  found:
+  1. Only 2-4 beacons arrived after start, then silence on every channel.
+  2. The baseband CRC counters (`0xF84`/`0xF94`) kept counting: the radio
+     was fine.
+  3. Descriptor TSF timestamps showed the 4 frames were received during
+     setup and only trickled out afterwards.
+  4. A staged test (apply the final settings one at a time, 2 s each) found
+     the cause: clearing CR.MACTXEN, my "receive only" safety switch, stops
+     the MAC receiving at all.
+  5. Fixed on the way: the AFE PLL (`0x28`/`0x29`) was missing; the
+     interrupt registers are at `0x120`-`0x12C`, and the old `0x44` write
+     had set the chip's GPIOs; the MAC address was 00:00:00:00:00:00.
+  6. Reference: Linux rtlwifi `rtl8192ce`/`rtl8192c` sources, read on
+     git.kernel.org (raw GitHub was rate-limited); no code copied.
+
+## 2026-10-17 - Wi-Fi TX and active scan (step 3)
+
+- **Transmit works** (sdk/src/wl.c, examples/26_wifi_active). The driver was
+  consolidated into the SDK (wl_hw_init/tx/rx_poll/set_channel) and extended
+  with the efuse read, a chained TX descriptor ring, and op-mode/BSSID.
+- Active scan: broadcast probe requests on each channel, then listen. 10
+  networks; several (UPC0682420, dziendobry, NCORE_44_EXT) appeared only as
+  probe responses, so real APs received our probe and replied to our MAC -
+  TX confirmed end to end. 52/52 probes released by the TX engine.
+- Two bugs found and fixed:
+  1. TX descriptors must be chained into a circular linked list via word 10
+     (next-desc address); unchained, the engine stopped after one frame.
+  2. The RX ring needs 32-byte descriptors. Reusing the 64-byte TX descriptor
+     struct for RX made the hardware read the RX ring at the wrong stride, so
+     almost nothing was received. Separate structs now.
+- TX power is left at the PHY_REG_PG factory defaults (fine at close range);
+  the efuse read supplies the MAC address and reports calibrated levels.
+
+## 2026-10-17 - Wi-Fi soft-AP demo (step 4)
+
+- examples/28_wifi_ap beacons an open SSID "OpenRTL8196C" on channel 7 and
+  answers probe / auth / association requests. Beacons and probe responses
+  go out reliably (hundreds of beacons, directed probe responses to nearby
+  devices).
+- AP op-mode (MSR=AP) was found to STALL all TX: the MAC gates transmit on
+  beacon/TBTT timing that we do not drive. Fixed by staying in no-link mode
+  and sending beacons from the normal TX queue; the MAC still auto-ACKs
+  frames addressed to our MACID, so open auth/assoc can still complete.
+- Open to confirm: a client completing auth+assoc (needs a device to try
+  joining during the run). The handlers are in place.
+- STA demo (examples/27_wifi_sta): next. Target DLINK_FastNet is WPA2, which
+  needs the 4-way handshake (PBKDF2/SHA1, EAPOL) and CCMP keys in the CAM -
+  the large remaining piece. Credentials go in git-ignored wifi_config.h.
+
+## 2026-10-17 - Soft-AP with HTTP: hardware beacons, data path, DHCP/DNS
+
+- New: `sdk/src/wl_ap.c` (soft AP: beacon, probe/auth/assoc responder, client
+  table, and a `net_link` bridging 802.11 data <-> Ethernet frames for
+  net.c), `dhcpd.c` (tiny DHCP server), `dnsd.c` (captive DNS), a pluggable
+  link layer in net.c (`net_set_link`), and examples/29_wifi_ap_http: open
+  AP "OpenRTL8196C" with the SDK's httpd at 192.168.4.1.
+- First association: a Windows PC joined (auth + assoc) on the very first run
+  of example 29, in hardware AP mode. Its DHCP never arrived because RCR had
+  no ADF (accept data frames) bit: only management frames were received.
+  Fixed (RCR |= ADF | ACF).
+- Hardware AP mode no longer stalls TX once REG_BCN_INTERVAL is set and a
+  beacon descriptor is armed (the earlier stall was a MAC waiting on TBTT
+  with no beacon interval).
+- Beacon queue semantics (measured via HISR TBDOK/BCNINT and the TBTT
+  counter in TDECTRL[31:24]): the beacon descriptor is persistent, the MAC
+  re-sends it every TBTT and never clears OWN. Refill descriptor 0 after
+  BCNINT (HISR bit 13), as rtl_pci's beacon tasklet does. Counting "OWN
+  cleared" undercounted beacons as 1.
+- BCN_CTRL (0x550) for AP: set bit 1 (rtl92ce _disable_bcn_sub_func SETS
+  it), keep bit 3 EN_BCN_FUNCTION, clear bit 4 DIS_TSF_UDT0; then
+  REG_DUAL_TSF_RST (0x553) = 3.
+- **TSF clock**: REG_USTIME_TSF (0x55C) only uses its low 6 bits. 0x50 (-> 16)
+  gave 2544 ticks/ms, 0x20 gave 1250, so ticks = 40000/divider: the MAC clock
+  is 40 MHz on this board. 0x28 = 40 gives exactly 1000/ms (1 us TSF), so
+  beacon interval 100 TU is a true 102.4 ms.
+- Software beacons from the normal queue were tried as a fallback; not shown
+  to help or hurt (no client joined either way after run 1), now off by
+  default (`wl_ap_sw_beacons`).
+- Open: no client has joined since the first run; in later runs no probe
+  request named our SSID at all, so the PC may not have been attempting.
+  Needs a confirmed join attempt against the fixed beacons (1 us TSF).
+- **Control run settles the regression** (examples/28 binary, unchanged):
+  the user's Windows PC saw the SSID, authenticated and associated through
+  our responder, sent QoS-null keepalives and then real data frames (one of
+  360 bytes = DHCP Discover) - all logged. That build predates the data path,
+  so the page could not load. Conclusions:
+  1. The join works with the "no-link mode + software beacons" recipe.
+  2. Hardware AP mode / TBTT beacons (as example 29 first used them) were
+     not visible to the PC. Cause still unknown (TSF divider, AP-mode
+     registers, or the beacon-queue frame); parked behind `hw_beacons=1`.
+  3. The RX path received data frames even without RCR.ADF (RXFLTMAP2
+     passes them); ADF is kept on, ACF off.
+  4. The on-air-proven TX descriptor values (rate_id 0xC, w4 =
+     hwseq|use_rate|0x1F<<16, w5 = 0, no BMC) are used; the trx.h-derived
+     layout is kept under `#if 0` until it can be checked with a sniffer.
+- examples/29 now defaults to that recipe (`wl_ap_start(..., 0)`). Join +
+  DHCP + HTTP over Wi-Fi still awaits a test with the user present at the
+  client PC (several 5-15 minute runs saw no join attempt at all).
+- Diagnostic that worked: counting probe requests that name our SSID
+  ("by name") tells whether any client is actually trying to connect.
+
+## 2026-10-17 - MILESTONE: web page served over the router's own Wi-Fi AP
+
+- The user's Windows PC joined "OpenRTL8196C" (open, channel 7), received
+  an address from the SDK's DHCP server (dhcpd.c) and opened
+  http://192.168.4.1/ in Chrome: the page came from the SDK's httpd.c over
+  the RTL8192CE, through sdk/src/wl_ap.c's 802.11 <-> Ethernet bridge into
+  net.c/tcp.c. First end-to-end Wi-Fi data path on this router from the
+  from-scratch driver. Build: examples/29_wifi_ap_http, soft-beacon recipe
+  (`wl_ap_start(..., 0)`), control-matched TX descriptor, RCR with ADF.
+- Not OBK yet: OBK only calls socket(); plugging the same net_link into the
+  stack OBK's sockets use is the remaining step for its panel at 192.168.4.1.
+- Confirmed from the served page itself (uptime 918 s): one station
+  associated at -64 dBm (1 auth, 1 assoc), 136 data frames in / 45 out,
+  0 TX failures, one DHCP lease (192.168.4.2) with the PC's hostname, 17
+  DNS queries answered, 4 HTTP requests. The soft-AP recipe plus the
+  net.c link bridge, dhcpd.c, dnsd.c and httpd.c all work over the air.
+
+## 2026-10-17 - Station mode: WPA2-PSK 4-way handshake completed on the first try
+
+- `sdk/src/wpa_crypto.c` (SHA-1, HMAC, PBKDF2, 802.11i PRF, AES-128, RFC 3394
+  unwrap) passes the published vectors on the host (tools/host_tests), and
+  the PTK derivation matches Python exactly.
+- `sdk/src/wl_sta.c` + examples/27_wifi_sta against the user's WPA2 test
+  AP: found on channel 2 at -26 dBm after 10 ms, open auth, association
+  (AID 2) at 318 ms, EAPOL messages 1-4 exchanged, keys installed at 650 ms
+  ("connected, WPA2 keys installed"). Received broadcast data from the LAN
+  is decrypted by the chip (165+ frames, 0 dropped). PMK derivation takes
+  24 s because the image runs uncached (0xA0500000).
+- Open: DHCP does not bind. Our DISCOVERs leave the TX engine (counted) but
+  no OFFER arrives. Suspects: the AP cannot decrypt our frames (TX side of
+  CCMP), or the offers come back in a form we miss. Diagnostics added
+  (unicast/broadcast counts, first received frames, AP cipher suites, GTK
+  size, DHCP client state) - pending a run.
+- Bench: the OBK smart socket now reports OFF without cutting the router's
+  power (UART keeps running), so flash.py's power cycle no longer works.
+  Workaround: `flash.py --no-cycle --esc-timeout N` plus a manual replug.
+  Fix for the future: `uart_esc_reboot_poll()` in uart.c; the Wi-Fi examples
+  call it, so the ESC flood from flash.py reboots a running board into the
+  loader by itself.

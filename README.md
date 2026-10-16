@@ -74,6 +74,13 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 20_usb_storage_soak | read-only soak: whole disk read 3 times with per-MB CRCs, every file CRC'd (`FILE size crc32 path`, compare with `tools/fat_crc.py`) |
 | 21_usb_fatfs | **writes** to a FAT/exFAT stick through FatFs: raw sector test with restore, files in `/rtltest` |
 | 22_usb_ntfs | NTFS stick or disk, read only: volume info, full tree walk, every file read and CRC'd (`ntfs.c`) |
+| 23_pcie_probe | PCIe bring-up (stock sequence), link training, identifies the Wi-Fi chip from its config space, powers the port down again |
+| 24_wifi_fw | Wi-Fi step 1: RTL8192CE power-on and firmware start (needs `tools/extract_wifi_blobs.py` run on your own flash backup; the firmware is never committed) |
+| 25_wifi_scan | Wi-Fi step 2: passive scan of channels 1-13, receive only. Lists networks heard (BSSID, SSID, channel, signal, security); same blob requirement as 24 |
+| 26_wifi_active | Wi-Fi step 3: active scan. Sends broadcast probe requests (first on-air TX) and collects probe responses + beacons (`sdk/src/wl.c`) |
+| 27_wifi_sta | Wi-Fi: station demo, joins an access point (open, and WPA2 via the 4-way handshake). Credentials in git-ignored `wifi_config.h` |
+| 28_wifi_ap | Wi-Fi: soft-AP demo, beacons an open test network and answers probe/auth/association |
+| 29_wifi_ap_http | **Working**: open Wi-Fi AP with DHCP, captive DNS and the SDK web server at http://192.168.4.1/ (`wl_ap.c`, `dhcpd.c`, `dnsd.c`); a PC joins and gets the page over the air |
 
 The experiments that measured the undocumented bits live in `probes/`
 (timer layout, exception vector, interrupt routing, the Ethernet receive
@@ -106,6 +113,8 @@ sdk/src/hid.c                HID report descriptor parser (mouse layout incl. wh
 sdk/src/usb_msc.c            USB mass storage: bulk-only transport + SCSI (read/write sectors)
 sdk/src/fat.c                read-only FAT12/16/32 with long file names
 sdk/src/ntfs.c               read-only NTFS (MBR/GPT, fragmented and sparse files, attribute lists, UTF-8 names)
+sdk/src/pcie.c               PCIe root port: stock bring-up sequence, BAR2 window at 0xB9000000, power down
+sdk/src/wl.c                 RTL8192CE Wi-Fi driver: MAC/BB/RF bring-up, firmware, fuse read, TX/RX rings, channel, op-mode
 sdk/src/diskio_usb.c         FatFs disk glue for USB mass storage (sdk/third_party/fatfs: read/write FAT + exFAT)
 sdk/rtl8196c.ld              link script (load at 0xA0500000, uncached)
 ```

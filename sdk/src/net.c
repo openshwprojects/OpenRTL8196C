@@ -22,6 +22,9 @@ static unsigned cache_next;
 static struct { uint16_t port; udp_handler_t h; } listeners[NET_MAX_UDP_LISTENERS];
 static uint8_t txf[1600];
 struct net_stats net_stats;
+static const struct net_link *link;                /* NULL = Ethernet switch */
+
+void net_set_link(const struct net_link *l) { link = l; }
 
 uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -116,7 +119,7 @@ void net_init(const uint8_t mac[6], const uint8_t ip[4])
     memset(cache, 0, sizeof cache);
     memset(listeners, 0, sizeof listeners);
     memset(&net_stats, 0, sizeof net_stats);
-    eth_init(mac);
+    if (!link) eth_init(mac);
 }
 
 int net_udp_listen(uint16_t port, udp_handler_t h)
@@ -142,7 +145,8 @@ static int send_frame(const uint8_t *dst_mac, int port, uint32_t len)
 {
     memcpy(txf, dst_mac, 6);
     memcpy(txf + 6, our_mac, 6);
-    int r = eth_send(txf, len, port < 0 ? ALL_PORT_MASK : (uint8_t)(1u << port));
+    uint8_t mask = port < 0 || port > 7 ? ALL_PORT_MASK : (uint8_t)(1u << port);
+    int r = link ? link->send(txf, len, mask) : eth_send(txf, len, mask);
     if (r == 0) net_stats.tx++;
     return r;
 }
@@ -296,7 +300,7 @@ static void handle_ip(const uint8_t *f, uint32_t len, int port)
 void net_poll(void)
 {
     uint8_t *f; uint32_t len; int port;
-    while (eth_recv(&f, &len, &port)) {
+    while (link ? link->recv(&f, &len, &port) : eth_recv(&f, &len, &port)) {
         net_stats.rx++;
         if (len >= 14) {
             uint16_t type = rd16(f + 12);
@@ -304,8 +308,8 @@ void net_poll(void)
             else if (type == 0x0800) handle_ip(f, len, port);
             else net_stats.dropped++;
         }
-        eth_recv_done();
+        if (link) link->recv_done(); else eth_recv_done();
     }
     tcp_poll();
-    eth_tx_reclaim();
+    if (link) { if (link->reclaim) link->reclaim(); } else eth_tx_reclaim();
 }

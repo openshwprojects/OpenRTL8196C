@@ -15,6 +15,11 @@ int  uart_getc(void);            /* blocking */
 int  uart_tx_ready(void);
 int  uart_rx_ready(void);
 uint8_t uart_lsr(void);          /* raw line status, for probing */
+/* Bench helper for long-running examples: call in the main loop.  An ESC byte
+ * on the UART (what tools/flash.py floods when it looks for the loader
+ * prompt) reboots into the factory loader, so the flasher can restart a
+ * running board without a power cycle.  Other bytes are returned (or -1). */
+int  uart_esc_reboot_poll(void);
 
 /* formatted output */
 int  printf(const char *fmt, ...);

@@ -13,6 +13,17 @@
 typedef void (*udp_handler_t)(const uint8_t src_ip[4], uint16_t src_port, uint16_t dst_port,
                               const uint8_t *data, uint32_t len);
 
+/* Link layer.  By default net.c drives the Ethernet switch (swcore.c).  A
+ * different interface (Wi-Fi) plugs in by providing these four calls before
+ * net_init; frames are Ethernet-shaped (dst, src, type, payload). */
+struct net_link {
+    int  (*recv)(uint8_t **frame, uint32_t *len, int *port);   /* 1 = frame available */
+    void (*recv_done)(void);
+    int  (*send)(const void *frame, uint32_t len, uint8_t portmask);
+    void (*reclaim)(void);                                     /* may be NULL */
+};
+void net_set_link(const struct net_link *link);   /* call before net_init; NULL = Ethernet */
+
 void net_init(const uint8_t mac[6], const uint8_t ip[4]);
 void net_poll(void);                                   /* handle every pending frame */
 int  net_udp_listen(uint16_t port, udp_handler_t h);  /* 0 ok, -1 full */
