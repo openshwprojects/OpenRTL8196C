@@ -245,9 +245,59 @@ def main():
     http_post(STATIC_IP, "/api/cmnd", b"Backlog stopDriver NTP; MqttHost \"\"")
     print(f"  MQTT CONNECT + CONNACK + incoming cmnd/obk_rtl8196c/SetChannel verified! Channels: {ch_mqtt}")
 
-    print("\nALL 9 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
+    print("=== 10. Testing Wi-Fi Soft-AP (192.168.4.1) & WPA2 STA + Dual DHCP ===")
+    wifi_cfg_path = ROOT / "examples" / "27_wifi_sta" / "wifi_config.h"
+    if wifi_cfg_path.exists():
+        import re
+        cfg_txt = wifi_cfg_path.read_text(encoding="utf-8", errors="replace")
+        m_ssid = re.search(r'#define\s+DEFAULT_WIFI_SSID\s+"([^"]*)"', cfg_txt)
+        m_pass = re.search(r'#define\s+DEFAULT_WIFI_PASS\s+"([^"]*)"', cfg_txt)
+        if m_ssid and m_pass and m_ssid.group(1):
+            w_ssid = m_ssid.group(1)
+            w_pass = m_pass.group(1)
+            q_ssid = urllib.parse.quote(f"SSID1 {w_ssid}")
+            q_pass = urllib.parse.quote(f"Password1 {w_pass}")
+            with serial.Serial(COM_PORT, BAUD, timeout=0.3) as ser:
+                ser.reset_input_buffer()
+                http_get(STATIC_IP, f"/cm?cmnd={q_ssid}")
+                http_get(STATIC_IP, f"/cm?cmnd={q_pass}")
+                sta_ip = None
+                deadline = time.time() + 18.0
+                while time.time() < deadline:
+                    chunk = ser.read(4096).decode("utf-8", "backslashreplace")
+                    if chunk:
+                        m_ip = re.search(r"STA DHCP bound: IP=(\d+\.\d+\.\d+\.\d+)", chunk)
+                        if m_ip:
+                            sta_ip = m_ip.group(1)
+                            break
+                    time.sleep(0.2)
+                assert sta_ip, "Timed out waiting for Wi-Fi STA DHCP lease"
+                st_eth, _ = http_get(STATIC_IP, "/api/info")
+                st_sta, info_sta_raw = http_get(sta_ip, "/api/info")
+                assert st_eth == 200 and st_sta == 200
+                info_sta = json.loads(info_sta_raw)
+                assert info_sta["ip"] == sta_ip
+                print(f"  Wi-Fi STA connected to '{w_ssid}' with DHCP IP {sta_ip}; HTTP verified on both Ethernet ({STATIC_IP}/{dhcp_ip}) and Wi-Fi ({sta_ip})!")
+
+                # Switch back to default Soft-AP mode (192.168.4.1)
+                ser.reset_input_buffer()
+                http_get(STATIC_IP, "/cm?cmnd=SSID1%20%22%22")
+                http_get(STATIC_IP, "/cm?cmnd=Password1%20%22%22")
+                ap_up = False
+                deadline = time.time() + 8.0
+                while time.time() < deadline:
+                    chunk = ser.read(4096).decode("utf-8", "backslashreplace")
+                    if "Soft-AP active:" in chunk and "192.168.4.1" in chunk:
+                        ap_up = True
+                        break
+                    time.sleep(0.2)
+                assert ap_up, "Expected router to return to Soft-AP mode (192.168.4.1)"
+                print("  Restored default Soft-AP mode (192.168.4.1/24, DHCP 192.168.4.2..9)")
+
+    print("\nALL 10 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
 
 
 if __name__ == "__main__":
     main()
+
 

@@ -39,6 +39,9 @@ static const uint8_t *find_opt(const uint8_t *o, const uint8_t *end, uint8_t cod
 static void on_dhcp(const uint8_t src_ip[4], uint16_t sport, uint16_t dport, const uint8_t *m, uint32_t len)
 {
     (void)src_ip; (void)sport; (void)dport;
+    const uint8_t *wip = net_wifi_ip();
+    if ((wip[0] | wip[1] | wip[2] | wip[3]) && net_rx_port() != NET_PORT_WIFI)
+        return; /* never answer DHCP on wired Ethernet when running AP on Wi-Fi */
     if (len < 240 || m[0] != 1 || m[1] != 1 || m[2] != 6) return;          /* BOOTREQUEST, Ethernet */
     if (!(m[236] == 0x63 && m[237] == 0x82 && m[238] == 0x53 && m[239] == 0x63)) return;
     const uint8_t *opts = m + 240, *end = m + len;
@@ -81,7 +84,10 @@ static void on_dhcp(const uint8_t src_ip[4], uint16_t sport, uint16_t dport, con
     r[n++] = 255;
     if (n < 300) n = 300;
     static const uint8_t bcast[4] = { 255, 255, 255, 255 };
-    if (net_udp_send(bcast, 67, 68, r, n) == 0) {
+    if (net_rx_port() == NET_PORT_WIFI) net_set_tx_port(NET_PORT_WIFI);
+    int rc = net_udp_send(bcast, 67, 68, r, n);
+    net_set_tx_port(-1);
+    if (rc == 0) {
         if (reply_type == 2) dhcpd_stats.offer++;
         else if (reply_type == 5) dhcpd_stats.ack++;
         else dhcpd_stats.nak++;
@@ -97,6 +103,11 @@ int dhcpd_start(const uint8_t server_ip[4], const uint8_t mask[4], uint8_t first
     memset(leases, 0, sizeof leases);
     memset(&dhcpd_stats, 0, sizeof dhcpd_stats);
     return net_udp_listen(67, on_dhcp);
+}
+
+void dhcpd_stop(void)
+{
+    net_udp_listen(67, 0);
 }
 
 int dhcpd_leases(const struct dhcpd_lease **out) { *out = leases; return DHCPD_MAX_LEASES; }

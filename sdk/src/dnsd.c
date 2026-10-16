@@ -11,6 +11,9 @@ struct dnsd_stats dnsd_stats;
 static void on_dns(const uint8_t src_ip[4], uint16_t sport, uint16_t dport, const uint8_t *q, uint32_t len)
 {
     (void)dport;
+    const uint8_t *wip = net_wifi_ip();
+    if ((wip[0] | wip[1] | wip[2] | wip[3]) && net_rx_port() != NET_PORT_WIFI)
+        return;
     if (len < 17 || (q[2] & 0x80) || rd16(q + 4) < 1) return;        /* a query with one question */
     dnsd_stats.queries++;
     uint32_t o = 12, k = 0;
@@ -42,7 +45,10 @@ static void on_dns(const uint8_t src_ip[4], uint16_t sport, uint16_t dport, cons
         wr16(r + n, 4); n += 2;
         memcpy(r + n, answer, 4); n += 4;
     }
-    if (net_udp_send(src_ip, 53, sport, r, n) == 0) dnsd_stats.answered++;
+    if (net_rx_port() == NET_PORT_WIFI) net_set_tx_port(NET_PORT_WIFI);
+    int rc = net_udp_send(src_ip, 53, sport, r, n);
+    net_set_tx_port(-1);
+    if (rc == 0) dnsd_stats.answered++;
 }
 
 int dnsd_start(const uint8_t answer_ip[4])
@@ -50,4 +56,9 @@ int dnsd_start(const uint8_t answer_ip[4])
     memcpy(answer, answer_ip, 4);
     memset(&dnsd_stats, 0, sizeof dnsd_stats);
     return net_udp_listen(53, on_dns);
+}
+
+void dnsd_stop(void)
+{
+    net_udp_listen(53, 0);
 }

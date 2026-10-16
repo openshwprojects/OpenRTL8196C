@@ -18,6 +18,7 @@ extern struct dhcpd_stats dhcpd_stats;
 
 /* server_ip is also router and DNS; pool is server_ip[3] replaced by first_host .. first_host+count-1 */
 int  dhcpd_start(const uint8_t server_ip[4], const uint8_t mask[4], uint8_t first_host, uint8_t count);
+void dhcpd_stop(void);
 int  dhcpd_leases(const struct dhcpd_lease **out);   /* number of entries */
 
 #endif

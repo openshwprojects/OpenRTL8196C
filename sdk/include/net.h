@@ -24,6 +24,23 @@ struct net_link {
 };
 void net_set_link(const struct net_link *link);   /* call before net_init; NULL = Ethernet */
 
+/* Dual-interface mode: keep Ethernet on switch ports 0..4 and attach Wi-Fi on NET_PORT_WIFI */
+#define NET_PORT_WIFI 7
+void net_set_wifi_link(const struct net_link *wlink, const uint8_t mac[6]);
+const uint8_t *net_wifi_mac(void);
+const uint8_t *net_wifi_ip(void);
+const uint8_t *net_wifi_netmask(void);
+const uint8_t *net_wifi_gateway(void);
+const uint8_t *net_wifi_dns(void);
+void net_set_wifi_ip(const uint8_t ip[4]);
+void net_set_wifi_netmask(const uint8_t mask[4]);
+void net_set_wifi_gateway(const uint8_t gw[4]);
+void net_set_wifi_dns(const uint8_t dns[4]);
+int  net_rx_port(void);                           /* port of frame currently in net_poll() */
+void net_set_tx_port(int port);                   /* -1 = auto, 0 = eth, NET_PORT_WIFI = wifi */
+const uint8_t *net_select_src_ip(const uint8_t dst_ip[4]);
+const uint8_t *net_select_dns(void);
+
 void net_init(const uint8_t mac[6], const uint8_t ip[4]);
 void net_poll(void);                                   /* handle every pending frame */
 int  net_udp_listen(uint16_t port, udp_handler_t h);  /* 0 ok, -1 full */

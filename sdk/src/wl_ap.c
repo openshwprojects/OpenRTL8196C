@@ -257,6 +257,10 @@ int wl_ap_start(struct wl_dev *d, const char *ssid, uint8_t chan, int hw_beacons
     strncpy(ap_ssid, ssid, 32); ap_ssid[32] = 0;
     memset(&wl_ap_stats, 0, sizeof wl_ap_stats);
     nclients = 0; rxq_head = rxq_tail = 0;
+    /* Clear any hardware security / BSSID filter left over from station mode */
+    wl_wr8(d, 0x0680, 0x00);
+    wl_wr8(d, 0x0101, wl_rd8(d, 0x0101) & ~0x02);
+    wl_wr32(d, 0x0608, wl_rd32(d, 0x0608) & ~((1u << 6) | (1u << 7) | (1u << 9)));
     uint8_t bc[6]; memset(bc, 0xFF, 6);
     beacon_len = mgmt_hdr(beacon, 0x80, bc);
     beacon_len = bss_body(beacon, beacon_len, 1);
@@ -267,6 +271,7 @@ int wl_ap_start(struct wl_dev *d, const char *ssid, uint8_t chan, int hw_beacons
     } else {
         /* examples/28 recipe: no-link mode, BSSID register set (no BSSID RX
          * filter, so broadcast probes and DHCP still arrive), software beacons */
+        wl_hw_set_opmode(d, 0);
         wl_hw_set_channel(d, chan);
         for (int i = 0; i < 6; i++) wl_wr8(d, 0x618 + i, d->mac[i]);
         wl_ap_sw_beacons = 1;
@@ -275,8 +280,17 @@ int wl_ap_start(struct wl_dev *d, const char *ssid, uint8_t chan, int hw_beacons
     return 0;
 }
 
+void wl_ap_stop(void)
+{
+    wl_ap_sw_beacons = 0;
+    hw_mode = 0;
+    nclients = 0;
+    rxq_head = rxq_tail = 0;
+}
+
 void wl_ap_poll(void)
 {
+    if (!dev) return;
     /* hardware beacon queue (sent at TBTT) when it accepts one; otherwise a
      * software beacon from the normal queue every 100 ms, so clients never
      * see beacon loss even if the TBTT path is idle */

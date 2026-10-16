@@ -395,16 +395,42 @@ static void on_rx(void *ctx, const uint8_t *f, uint32_t len, uint8_t ch, int rss
 }
 
 /* -------------------------------------------------------------- driving */
-int wl_sta_start(struct wl_dev *d, const char *s, const char *passphrase)
+static char cached_ssid[33], cached_pass[64];
+static uint8_t cached_pmk[32];
+static int cached_pmk_valid;
+
+int wl_sta_start_pmk(struct wl_dev *d, const char *s, const char *passphrase, const uint8_t pre_pmk[32])
 {
     dev = d;
-    strncpy(ssid, s, 32); ssid[32] = 0;
+    strncpy(ssid, s ? s : "", 32); ssid[32] = 0;
     strncpy(pass, passphrase ? passphrase : "", 63); pass[63] = 0;
     memset(&info, 0, sizeof info);
     rxq_head = rxq_tail = 0;
     build_rsn_ie();
     have_pmk = 0;
-    if (pass[0]) { wpa_pmk(pass, (const uint8_t *)ssid, strlen(ssid), pmk); have_pmk = 1; }
+    if (pass[0]) {
+        if (pre_pmk) {
+            memcpy(pmk, pre_pmk, 32);
+            memcpy(cached_pmk, pre_pmk, 32);
+            strcpy(cached_ssid, ssid);
+            strcpy(cached_pass, pass);
+            cached_pmk_valid = 1;
+        } else if (cached_pmk_valid && strcmp(cached_ssid, ssid) == 0 && strcmp(cached_pass, pass) == 0) {
+            memcpy(pmk, cached_pmk, 32);
+        } else {
+            wpa_pmk(pass, (const uint8_t *)ssid, strlen(ssid), pmk);
+            memcpy(cached_pmk, pmk, 32);
+            strcpy(cached_ssid, ssid);
+            strcpy(cached_pass, pass);
+            cached_pmk_valid = 1;
+        }
+        have_pmk = 1;
+    }
+    /* Clear any hardware security / BSSID filter left over from previous state */
+    wl_wr8(d, REG_SECCFG, 0x00);
+    wl_wr8(d, 0x0101, wl_rd8(d, 0x0101) & ~0x02);
+    wl_wr32(d, 0x0608, wl_rd32(d, 0x0608) & ~((1u << 6) | (1u << 7) | (1u << 9)));
+    wl_hw_set_opmode(d, 0);
     wl_hw_tx_enable(d);
     scan_chan = 1;
     wl_hw_set_channel(d, scan_chan);
@@ -413,8 +439,32 @@ int wl_sta_start(struct wl_dev *d, const char *s, const char *passphrase)
     return 0;
 }
 
+int wl_sta_start(struct wl_dev *d, const char *s, const char *passphrase)
+{
+    return wl_sta_start_pmk(d, s, passphrase, 0);
+}
+
+void wl_sta_get_pmk(uint8_t out_pmk[32])
+{
+    if (out_pmk) memcpy(out_pmk, pmk, 32);
+}
+
+void wl_sta_stop(void)
+{
+    if (dev) {
+        wl_wr8(dev, REG_SECCFG, 0x00);
+        wl_wr8(dev, 0x0101, wl_rd8(dev, 0x0101) & ~0x02);
+        wl_wr32(dev, 0x0608, wl_rd32(dev, 0x0608) & ~((1u << 6) | (1u << 7) | (1u << 9)));
+        wl_hw_set_opmode(dev, 0);
+    }
+    info.secured = 0;
+    set_state(WL_STA_IDLE);
+    rxq_head = rxq_tail = 0;
+}
+
 void wl_sta_poll(void)
 {
+    if (!dev || info.state == WL_STA_IDLE) return;
     wl_hw_rx_poll(dev, on_rx, 0);
     uint32_t now = timer_ms();
     switch (info.state) {
@@ -439,6 +489,9 @@ void wl_sta_poll(void)
     case WL_STA_FAILED:
         if (now - t_state > 5000u) {                         /* try again from the scan */
             info.secured = 0;
+            wl_wr8(dev, REG_SECCFG, 0x00);
+            wl_wr32(dev, 0x0608, wl_rd32(dev, 0x0608) & ~((1u << 6) | (1u << 7) | (1u << 9)));
+            wl_hw_set_opmode(dev, 0);
             set_state(WL_STA_SCANNING);
             send_probe();
         }

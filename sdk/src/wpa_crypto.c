@@ -97,6 +97,10 @@ void hmac_sha1(const uint8_t *key, uint32_t klen, const uint8_t *data, uint32_t 
     hmac_sha1_v(key, klen, parts, lens, 1, out);
 }
 
+#ifndef HOST_TEST
+__attribute__((weak)) void wpa_crypto_yield(void) {}
+#endif
+
 /* ----------------------------------------------------------------- PBKDF2 */
 static void pbkdf2_block(const uint8_t *pw, uint32_t pwlen, const uint8_t *salt, uint32_t slen, uint32_t iter,
                          uint32_t index, uint8_t out[20])
@@ -106,9 +110,45 @@ static void pbkdf2_block(const uint8_t *pw, uint32_t pwlen, const uint8_t *salt,
     uint8_t u[20];
     hmac_sha1_v(pw, pwlen, parts, lens, 2, u);
     memcpy(out, u, 20);
+
+    /* Precompute SHA-1 state after 64-byte ipad and opad blocks */
+    uint8_t k[64], kh[20], pad[64], blk[64];
+    if (pwlen > 64) { sha1(pw, pwlen, kh); pw = kh; pwlen = 20; }
+    memset(k, 0, 64); memcpy(k, pw, pwlen);
+    struct sha1_ctx ci, co;
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+    sha1_init(&ci); sha1_block(ci.h, pad);
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5C;
+    sha1_init(&co); sha1_block(co.h, pad);
+
+    /* Padded 64-byte SHA-1 final block for a 20-byte message after a 64-byte key pad (total 84 bytes = 672 bits = 0x2A0) */
+    memset(blk, 0, 64);
+    blk[20] = 0x80;
+    blk[62] = 0x02; blk[63] = 0xA0;
+
     for (uint32_t i = 1; i < iter; i++) {
-        hmac_sha1(pw, pwlen, u, 20, u);
-        for (int k = 0; k < 20; k++) out[k] ^= u[k];
+        uint32_t h[5];
+        memcpy(h, ci.h, 20);
+        memcpy(blk, u, 20);
+        sha1_block(h, blk);
+        for (int j = 0; j < 5; j++) {
+            blk[4 * j]     = (uint8_t)(h[j] >> 24);
+            blk[4 * j + 1] = (uint8_t)(h[j] >> 16);
+            blk[4 * j + 2] = (uint8_t)(h[j] >> 8);
+            blk[4 * j + 3] = (uint8_t)h[j];
+        }
+        memcpy(h, co.h, 20);
+        sha1_block(h, blk);
+        for (int j = 0; j < 5; j++) {
+            u[4 * j]     = (uint8_t)(h[j] >> 24);
+            u[4 * j + 1] = (uint8_t)(h[j] >> 16);
+            u[4 * j + 2] = (uint8_t)(h[j] >> 8);
+            u[4 * j + 3] = (uint8_t)h[j];
+        }
+        for (int j = 0; j < 20; j++) out[j] ^= u[j];
+#ifndef HOST_TEST
+        if ((i & 63u) == 0) wpa_crypto_yield();
+#endif
     }
 }
 

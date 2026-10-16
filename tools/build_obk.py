@@ -87,12 +87,29 @@ def main():
     obj_dir = out / "obj"
     obj_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure wifi_blobs.inc exists in build/obk (git-ignored)
+    blobs_inc = out / "wifi_blobs.inc"
+    if not blobs_inc.exists():
+        existing_blobs = sorted((ROOT / "examples").glob("*/wifi_blobs.inc"))
+        if existing_blobs:
+            blobs_inc.write_bytes(existing_blobs[0].read_bytes())
+        else:
+            backups = sorted((ROOT / "backups").glob("flash_*.bin"))
+            if backups:
+                subprocess.run([
+                    sys.executable, str(ROOT / "tools" / "extract_wifi_blobs.py"),
+                    str(backups[-1]), "--blobs-inc", str(blobs_inc)
+                ], check=True)
+            else:
+                sys.exit("missing wifi_blobs.inc: run tools/extract_wifi_blobs.py on your flash backup first")
+
     arch = build.arch_flags("mips1")
     common_flags = build.common_cflags("mips1", "s") + [
         "-DPLATFORM_RTL8196C=1",
         f'-DUSER_SW_VER="{args.ver}"',
         f"-I{SDK / 'include' / 'obk_shim'}",
         f"-I{SDK / 'include'}",
+        f"-I{out}",
         f"-I{obk_root / 'src'}",
     ]
     sdk_cflags = common_flags + ["-Wall", "-Wextra", "-Wno-unused-parameter"]
@@ -101,7 +118,7 @@ def main():
     ]
     asflags = build.as_flags("mips1")
 
-    sdk_exclude = {"httpd.c", "statuspage.c", "console.c"}
+    sdk_exclude = {"httpd.c", "statuspage.c", "console.c", "diskio_usb.c"}
     sdk_srcs = [
         p for p in (sorted((SDK / "src").glob("*.S")) + sorted((SDK / "src").glob("*.c")))
         if p.name not in sdk_exclude

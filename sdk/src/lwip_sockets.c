@@ -425,7 +425,7 @@ int lwip_sendto(int fd, const void *data, size_t size, int flags,
         if (next_udp_ephemeral < 50000) next_udp_ephemeral = 50000;
         net_udp_listen(s->local_port, on_udp_packet);
     }
-    net_set_active_ip(net_ip());
+    net_set_active_ip(net_select_src_ip(dst_ip));
     int r = net_udp_send(dst_ip, s->local_port, dst_port, data, (uint32_t)size);
     return (r == 0) ? (int)size : -1;
 }
@@ -836,9 +836,10 @@ static int resolve_hostname_ipv4(const char *hostname, uint8_t out_ip[4])
     wr16(pkt + pos, 1); pos += 2; /* QCLASS = IN */
 
     dns_got_reply = 0;
-    net_set_active_ip(net_ip());
+    const uint8_t *dns_ip = net_select_dns();
+    net_set_active_ip(net_select_src_ip(dns_ip));
     net_udp_listen(53535, on_dns_udp);
-    net_udp_send(net_dns(), 53535, 53, pkt, pos);
+    net_udp_send(dns_ip, 53535, 53, pkt, pos);
 
     uint32_t start = xTaskGetTickCount();
     while (!dns_got_reply && (uint32_t)(xTaskGetTickCount() - start) < 1200)

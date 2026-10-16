@@ -12,6 +12,7 @@
 struct dnsd_stats { uint32_t queries, answered; char last_name[64]; };
 extern struct dnsd_stats dnsd_stats;
 
-int dnsd_start(const uint8_t answer_ip[4]);
+int  dnsd_start(const uint8_t answer_ip[4]);
+void dnsd_stop(void);
 
 #endif

@@ -29,4 +29,11 @@ void dhcp_poll(void);
 int  dhcp_bound(void);
 const struct dhcp_lease *dhcp_info(void);
 
+/* Secondary DHCP client on NET_PORT_WIFI for Wi-Fi station mode */
+void dhcp_wifi_start(const char *hostname);
+void dhcp_wifi_stop(void);
+void dhcp_wifi_poll(void);
+int  dhcp_wifi_bound(void);
+const struct dhcp_lease *dhcp_wifi_info(void);
+
 #endif

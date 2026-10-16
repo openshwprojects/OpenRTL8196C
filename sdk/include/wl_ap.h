@@ -32,6 +32,7 @@ extern int wl_ap_trace;                      /* 1 = print the first frames stati
  * (the recipe a Windows PC joined); 1: hardware AP mode, TBTT beacon queue
  * (not yet seen by clients, under investigation). */
 int  wl_ap_start(struct wl_dev *d, const char *ssid, uint8_t chan, int hw_beacons);
+void wl_ap_stop(void);
 const struct net_link *wl_ap_link(void);
 void wl_ap_poll(void);                       /* keeps the next beacon armed */
 int  wl_ap_clients(const struct wl_ap_client **out);   /* number of entries */

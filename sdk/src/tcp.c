@@ -150,7 +150,7 @@ tcp_conn_t *tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port,
     uint32_t now = micros();
     memset(c, 0, sizeof *c);
     memcpy(c->rip, dst_ip, 4);
-    memcpy(c->lip, net_ip(), 4);
+    memcpy(c->lip, net_select_src_ip(dst_ip), 4);
     c->rport = dst_port;
     c->lport = next_ephemeral++;
     if (next_ephemeral < 49152) next_ephemeral = 49152;

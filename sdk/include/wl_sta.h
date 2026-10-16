@@ -38,6 +38,9 @@ struct wl_sta_info {
 extern int wl_sta_trace;            /* 1 = print the first received data frames */
 
 int  wl_sta_start(struct wl_dev *d, const char *ssid, const char *passphrase);
+int  wl_sta_start_pmk(struct wl_dev *d, const char *ssid, const char *passphrase, const uint8_t pre_pmk[32]);
+void wl_sta_get_pmk(uint8_t out_pmk[32]);
+void wl_sta_stop(void);
 void wl_sta_poll(void);
 const struct wl_sta_info *wl_sta_info(void);
 const struct net_link *wl_sta_link(void);
