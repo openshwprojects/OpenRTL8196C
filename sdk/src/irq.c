@@ -8,6 +8,7 @@
 #include "rtl8196c.h"
 #include "irq.h"
 #include "uart.h"
+#include "timer.h"
 
 extern const uint32_t exc_trampoline[];
 extern const uint32_t exc_trampoline_end[];
@@ -201,9 +202,9 @@ void exception_dispatch(struct exc_frame *f)
         if (exception_hook && exception_hook(f))
             return;
         dump_frame(f);
-        printf("*** halted\n");
-        for (;;)
-            ;
+        printf("*** rebooting via watchdog\n");
+        REG32(GPIO_PABCD_DAT) &= ~(1u << 4);
+        wdt_reboot();
     }
 
     irq_count_total++;

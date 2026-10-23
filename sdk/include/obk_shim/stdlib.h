@@ -28,5 +28,7 @@ void  srand(unsigned int seed);
 int   rand(void);
 void  qsort(void *base, size_t nmemb, size_t size,
             int (*compar)(const void *, const void *));
+void  abort(void);
+void  exit(int status);
 
 #endif

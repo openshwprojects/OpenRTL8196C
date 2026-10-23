@@ -12,7 +12,6 @@ OUTPUT_ARCH(mips)
 ENTRY(_start)
 
 LOAD_ADDR  = DEFINED(LOAD_ADDR)  ? LOAD_ADDR  : 0xA0500000;
-STACK_TOP  = DEFINED(STACK_TOP)  ? STACK_TOP  : 0xA0600000;
 
 SECTIONS
 {
@@ -43,7 +42,7 @@ SECTIONS
     _bss_end = .;
     _end = .;
 
-    _stack_top = STACK_TOP;
+    _stack_top = DEFINED(STACK_TOP) ? STACK_TOP : 0xA06F0000;
 
     /DISCARD/ : {
         *(.comment) *(.note*) *(.MIPS.abiflags) *(.reginfo) *(.pdr)

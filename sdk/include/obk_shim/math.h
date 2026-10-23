@@ -50,5 +50,11 @@ float  log10f(float x);
 double pow(double x, double y);
 float  powf(float x, float y);
 double ldexp(double x, int exp);
+double sinh(double x);
+float  sinhf(float x);
+double cosh(double x);
+float  coshf(float x);
+double tanh(double x);
+float  tanhf(float x);
 
 #endif

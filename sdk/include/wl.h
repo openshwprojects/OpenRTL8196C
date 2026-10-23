@@ -33,13 +33,18 @@ struct wl_dev {
     uint32_t chnlval[2];                    /* RF reg 0x18 per path */
     uint8_t  pwr_cck[14], pwr_ht40_1s[14];  /* calibrated TX power per channel, path A */
     int      fuse_ok;
+    uint8_t  ther_ref;                      /* calibrated thermal meter baseline (default 14) */
+    uint8_t  ther_hist[8];                  /* 8-sample moving average of RF reg 0x24[4:0] */
+    uint8_t  ther_idx;
+    uint8_t  ther_cnt;
 };
 
 enum { WL_CH_MIN = 1, WL_CH_MAX = 13 };
 
 /* bring the chip up; returns 0 or negative.  Receives after this, no TX. */
-int  wl_hw_init(struct wl_dev *d, const struct wl_tables *t);
-void wl_hw_set_channel(struct wl_dev *d, uint8_t ch);
+int   wl_hw_init(struct wl_dev *d, const struct wl_tables *t);
+void  wl_hw_set_channel(struct wl_dev *d, uint8_t ch);
+float wl_hw_read_temperature(struct wl_dev *d, uint8_t *out_raw);
 
 /* received frame, handed to the callback: 802.11 frame (no FCS), length,
  * channel, signal in dBm.  Call wl_hw_rx_poll in a loop. */

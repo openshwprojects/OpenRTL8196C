@@ -7,7 +7,10 @@
 
 #include <stdint.h>
 
+struct usb_dev;
+
 struct usb_msc {
+    const struct usb_dev *dev;
     uint8_t  ep_in, ep_out, iface, lun;
     uint16_t maxp_in, maxp_out;
     uint32_t blocks;           /* number of sectors */
@@ -22,14 +25,16 @@ struct usb_msc {
 /* call after usb_poll() reported USB_EV_CONNECTED; 0 = ready, <0 = not a
  * mass storage device or no medium */
 int msc_init(struct usb_msc *m);
+int msc_init_dev(struct usb_msc *m, const struct usb_dev *d);
 int msc_read(struct usb_msc *m, uint32_t lba, uint32_t count, void *buf);
 int msc_write(struct usb_msc *m, uint32_t lba, uint32_t count, const void *buf);
 int msc_test_unit_ready(struct usb_msc *m);
 int msc_sync(struct usb_msc *m);           /* SYNCHRONIZE CACHE */
 int msc_write_protected(struct usb_msc *m); /* 1 = WP, 0 = writable, <0 = device did not say */
 
-/* FatFs drive "0:" = this device (sdk/src/diskio_usb.c) */
+/* FatFs drive "0:" = this device, or slot 0..3 ("0:".."3:") (sdk/src/diskio_usb.c) */
 void diskio_usb_attach(struct usb_msc *m);
+void diskio_usb_attach_slot(int pdrv, struct usb_msc *m);
 
 /* everything the transport had to recover from; all zero on a clean run */
 struct msc_stats {

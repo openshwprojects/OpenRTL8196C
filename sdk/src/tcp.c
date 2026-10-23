@@ -23,6 +23,7 @@ struct tcp_conn {
     uint8_t  fin_sent;        /* FIN is in flight or acked */
     uint8_t  fin_acked;
     uint8_t  peer_fin;        /* the peer's FIN has been received (in order) */
+    uint8_t  rx_full;         /* socket rx_buf has no room for another segment */
     uint8_t  retries;
     uint8_t  rip[4];
     uint8_t  lip[4];
@@ -119,7 +120,8 @@ static void conn_ack_update(struct tcp_conn *c, uint32_t ack, uint16_t wnd)
     uint32_t acked = ack - c->snd_una;
     uint32_t data_acked = acked > c->snd_len ? c->snd_len : acked;
     if (data_acked) {
-        memmove(c->sndbuf, c->sndbuf + data_acked, c->snd_len - data_acked);
+        if (c->snd_len > data_acked)
+            memmove(c->sndbuf, c->sndbuf + data_acked, c->snd_len - data_acked);
         c->snd_len -= data_acked;
     }
     if (c->fin_sent && acked > data_acked)
@@ -159,12 +161,12 @@ tcp_conn_t *tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port,
     c->snd_una = (now << 4) ^ 0xA5A50000u ^ ((uint32_t)(c - conns) << 24);
     c->snd_nxt = c->snd_una + 1;
     c->snd_wnd = 1460;
-    c->rcv_wnd = 4096;
+    c->rcv_wnd = 16384;
     c->state = SYN_SENT;
     c->t_last = c->t_rtx = now;
     net_set_active_ip(c->lip);
     send_raw(c->rip, c->lport, c->rport, c->snd_una, 0, F_SYN, c->rcv_wnd, 0, 0, 1);
-    return c;
+    return (c->state != FREE) ? c : 0;
 }
 
 int tcp_is_established(tcp_conn_t *c)
@@ -174,6 +176,7 @@ int tcp_is_established(tcp_conn_t *c)
 
 int tcp_send(tcp_conn_t *c, const void *data, uint32_t len)
 {
+    if (!c) return -1;
     if (c->state != ESTABLISHED && c->state != CLOSE_WAIT) return -1;
     if (c->fin_queued) return -1;
     uint32_t space = TCP_SNDBUF - c->snd_len;
@@ -187,12 +190,12 @@ int tcp_send(tcp_conn_t *c, const void *data, uint32_t len)
 
 uint32_t tcp_send_space(tcp_conn_t *c)
 {
-    return (c->state == ESTABLISHED || c->state == CLOSE_WAIT) ? TCP_SNDBUF - c->snd_len : 0;
+    return (c && (c->state == ESTABLISHED || c->state == CLOSE_WAIT)) ? TCP_SNDBUF - c->snd_len : 0;
 }
 
 void tcp_close(tcp_conn_t *c)
 {
-    if (c->state == FREE || c->fin_queued) return;
+    if (!c || c->state == FREE || c->fin_queued) return;
     c->fin_queued = 1;
     c->t_last = c->t_rtx = micros();
     if (c->state == ESTABLISHED) c->state = FIN_WAIT_1;
@@ -207,7 +210,7 @@ void tcp_close(tcp_conn_t *c)
 
 void tcp_abort(tcp_conn_t *c)
 {
-    if (c->state == FREE) return;
+    if (!c || c->state == FREE) return;
     conn_send(c, c->snd_nxt, F_RST | F_ACK, 0, 0);
     tcp_stats.resets++;
     conn_free(c, 1);
@@ -216,14 +219,20 @@ void tcp_abort(tcp_conn_t *c)
 void tcp_set_rcv_wnd(tcp_conn_t *c, uint16_t wnd)
 {
     if (!c) return;
+    if (wnd == 0xFFFFu) {
+        c->rcv_wnd = 0;
+        c->rx_full = 1;
+        return;
+    }
     uint16_t old = c->rcv_wnd;
+    c->rx_full = 0;
     c->rcv_wnd = wnd;
     if (c->state == ESTABLISHED && old == 0 && wnd > 0)
         conn_send(c, c->snd_nxt, F_ACK, 0, 0);
 }
 
-void tcp_set_user(tcp_conn_t *c, void *user) { c->user = user; }
-void *tcp_user(tcp_conn_t *c) { return c->user; }
+void tcp_set_user(tcp_conn_t *c, void *user) { if (c) c->user = user; }
+void *tcp_user(tcp_conn_t *c) { return c ? c->user : 0; }
 uint16_t tcp_local_port(tcp_conn_t *c) { return c->lport; }
 uint16_t tcp_remote_port(tcp_conn_t *c) { return c->rport; }
 const uint8_t *tcp_remote_ip(tcp_conn_t *c) { return c->rip; }
@@ -283,7 +292,7 @@ void tcp_input(const uint8_t src_ip[4], const uint8_t *s, uint32_t len)
         c->snd_una = (now << 4) ^ 0x5A5A0000u ^ ((uint32_t)(c - conns) << 24);
         c->snd_nxt = c->snd_una + 1;
         c->snd_wnd = wnd ? wnd : 1460;
-        c->rcv_wnd = 4096;
+        c->rcv_wnd = 16384;
         c->state = SYN_RCVD;
         c->t_last = c->t_rtx = now;
         tcp_stats.syn++;
@@ -339,7 +348,7 @@ void tcp_input(const uint8_t src_ip[4], const uint8_t *s, uint32_t len)
     }
 
     if (dlen) {
-        if (c->rcv_wnd == 0) {
+        if (c->rx_full) {
             conn_send(c, c->snd_nxt, F_ACK, 0, 0);
             goto progress;
         }
@@ -383,8 +392,12 @@ progress:
         conn_free(c, 1);
 }
 
+static int in_tcp_poll = 0;
+
 void tcp_poll(void)
 {
+    if (in_tcp_poll) return;
+    in_tcp_poll = 1;
     uint32_t now = micros();
     for (int i = 0; i < TCP_MAX_CONN; i++) {
         struct tcp_conn *c = &conns[i];
@@ -400,13 +413,13 @@ void tcp_poll(void)
         if (c->state == SYN_RCVD || c->state == SYN_SENT) {
             if (((now - c->t_rtx) & TC_DATA_MAX) > TCP_RTX_MS * 1000u) {
                 if (++c->retries > TCP_MAX_RETRIES) { conn_free(c, 1); tcp_stats.timeouts++; continue; }
+                c->t_rtx = now;
+                tcp_stats.retransmits++;
                 net_set_active_ip(c->lip);
                 if (c->state == SYN_RCVD)
                     send_raw(c->rip, c->lport, c->rport, c->snd_una, c->rcv_nxt, F_SYN | F_ACK, c->rcv_wnd, 0, 0, 1);
                 else
                     send_raw(c->rip, c->lport, c->rport, c->snd_una, 0, F_SYN, c->rcv_wnd, 0, 0, 1);
-                c->t_rtx = now;
-                tcp_stats.retransmits++;
             }
         } else if (unacked && ((now - c->t_rtx) & TC_DATA_MAX) > TCP_RTX_MS * 1000u) {
             if (++c->retries > TCP_MAX_RETRIES) {
@@ -415,10 +428,12 @@ void tcp_poll(void)
                 conn_free(c, 1);
                 continue;
             }
+            c->t_rtx = now;
             tcp_stats.retransmits++;
             c->snd_nxt = c->snd_una;                            /* go back N */
             c->fin_sent = 0;
             conn_flush(c);
         }
     }
+    in_tcp_poll = 0;
 }

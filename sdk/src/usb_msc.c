@@ -22,18 +22,18 @@ struct msc_stats msc_stats;
 static void reset_recovery(struct usb_msc *m)
 {
     msc_stats.reset_recoveries++;
-    usb_control(0x21, 0xFF, 0, m->iface, 0, 0);
-    usb_clear_halt(m->ep_in);
-    usb_clear_halt(m->ep_out);
+    usb_control_dev(m->dev, 0x21, 0xFF, 0, m->iface, 0, 0);
+    usb_clear_halt_dev(m->dev, m->ep_in);
+    usb_clear_halt_dev(m->dev, m->ep_out);
 }
 
 static int read_csw(struct usb_msc *m, uint8_t *csw)
 {
-    int n = usb_bulk(m->ep_in, m->maxp_in, csw, 13, TIMEOUT_MS);
+    int n = usb_bulk_dev(m->dev, m->ep_in, m->maxp_in, csw, 13, TIMEOUT_MS);
     if (n == -2) {                         /* stalled: clear and try once more */
         msc_stats.stalls++;
-        usb_clear_halt(m->ep_in);
-        n = usb_bulk(m->ep_in, m->maxp_in, csw, 13, TIMEOUT_MS);
+        usb_clear_halt_dev(m->dev, m->ep_in);
+        n = usb_bulk_dev(m->dev, m->ep_in, m->maxp_in, csw, 13, TIMEOUT_MS);
     }
     return n;
 }
@@ -52,13 +52,13 @@ static int bot(struct usb_msc *m, const uint8_t *cdb, uint8_t cdb_len, int in, v
     memcpy(cbw + 15, cdb, cdb_len);
     msc_stats.commands++;
 
-    int n = usb_bulk(m->ep_out, m->maxp_out, cbw, 31, TIMEOUT_MS);
+    int n = usb_bulk_dev(m->dev, m->ep_out, m->maxp_out, cbw, 31, TIMEOUT_MS);
     if (n != 31) { msc_stats.bulk_errors++; reset_recovery(m); return n < 0 ? n : -5; }
 
     int moved = 0;
     if (len) {
-        moved = usb_bulk(in ? m->ep_in : m->ep_out, in ? m->maxp_in : m->maxp_out, data, len, TIMEOUT_MS);
-        if (moved == -2) { msc_stats.stalls++; usb_clear_halt(in ? m->ep_in : m->ep_out); moved = 0; }
+        moved = usb_bulk_dev(m->dev, in ? m->ep_in : m->ep_out, in ? m->maxp_in : m->maxp_out, data, len, TIMEOUT_MS);
+        if (moved == -2) { msc_stats.stalls++; usb_clear_halt_dev(m->dev, in ? m->ep_in : m->ep_out); moved = 0; }
         else if (moved < 0) { msc_stats.bulk_errors++; reset_recovery(m); return moved; }
     }
     n = read_csw(m, csw);
@@ -100,11 +100,14 @@ static void copy_trim(char *dst, const uint8_t *src, int n)
     while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == 0)) dst[--n] = 0;
 }
 
-int msc_init(struct usb_msc *m)
+int msc_init_dev(struct usb_msc *m, const struct usb_dev *d)
 {
     struct usb_ep_info in, out;
     memset(m, 0, sizeof *m);
-    if (usb_find_endpoint(0x08, 2, 1, &in) < 0 || usb_find_endpoint(0x08, 2, 0, &out) < 0)
+    if (!d || !d->present)
+        return -1;
+    m->dev = d;
+    if (usb_find_endpoint_dev(d, 0x08, 2, 1, &in) < 0 || usb_find_endpoint_dev(d, 0x08, 2, 0, &out) < 0)
         return -1;                                     /* no mass storage interface */
     if (in.subclass != 0x06 || in.protocol != 0x50)
         printf("msc: subclass %02x protocol %02x (expected 06/50), trying anyway\n", in.subclass, in.protocol);
@@ -113,7 +116,7 @@ int msc_init(struct usb_msc *m)
     m->iface = in.iface;
 
     uint8_t maxlun = 0;
-    if (usb_control(0xA1, 0xFE, 0, m->iface, 1, &maxlun) < 1) maxlun = 0;   /* GET MAX LUN, may stall */
+    if (usb_control_dev(d, 0xA1, 0xFE, 0, m->iface, 1, &maxlun) < 1) maxlun = 0;   /* GET MAX LUN, may stall */
 
     uint8_t inq[36], cdb[12];
     memset(cdb, 0, sizeof cdb);
@@ -141,6 +144,19 @@ int msc_init(struct usb_msc *m)
     m->block_size = get32be(cap + 4);
     (void)maxlun;
     return 0;
+}
+
+int msc_init(struct usb_msc *m)
+{
+    const struct usb_dev *d = usb_dev();
+    if (d && d->is_hub) {
+        for (int i = 1; i < usb_dev_count(); i++) {
+            const struct usb_dev *cd = usb_get_dev(i);
+            if (cd && cd->present && msc_init_dev(m, cd) == 0)
+                return 0;
+        }
+    }
+    return msc_init_dev(m, d);
 }
 
 static int rw10(struct usb_msc *m, uint8_t op, uint32_t lba, uint32_t count, void *buf, int in)

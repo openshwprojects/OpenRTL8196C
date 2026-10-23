@@ -40,9 +40,11 @@ import build  # noqa: E402
 def parse_obk_sources(obk_root: Path):
     mk = obk_root / "platforms" / "obk_main.mk"
     plat_mk = obk_root / "platforms" / "RTL8196C" / "OpenBeken.mk"
+    berry_mk = obk_root / "libraries" / "berry.mk"
     if not mk.exists():
         sys.exit(f"missing {mk}")
     srcs = []
+    include_berry = False
     if plat_mk.exists():
         for raw in plat_mk.read_text(encoding="utf-8", errors="replace").splitlines():
             line = raw.strip()
@@ -51,6 +53,8 @@ def parse_obk_sources(obk_root: Path):
             m = re.match(r"^SRC_C\s*\+=\s*\$\(OBK_DIR\)/src/(.+\.c)\s*$", line)
             if m:
                 srcs.append(obk_root / "src" / m.group(1).strip())
+            if "berry.mk" in line:
+                include_berry = True
     for raw in mk.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -59,7 +63,34 @@ def parse_obk_sources(obk_root: Path):
         if m:
             rel = m.group(1).strip()
             srcs.append(obk_root / "src" / rel)
+    if include_berry and berry_mk.exists():
+        for raw in berry_mk.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r"^BERRY_SRC_C\s*\+=\s*\$\(BERRY_SRCPATH\)/(.+\.c)\s*$", line)
+            if m:
+                srcs.append(obk_root / "libraries" / "berry" / "src" / m.group(1).strip())
+                continue
+            m = re.match(r"^BERRY_SRC_C\s*\+=\s*\$\(BERRY_MODULEPATH\)/(.+\.c)\s*$", line)
+            if m:
+                srcs.append((obk_root / "src" / "berry" / "modules" / m.group(1).strip()).resolve())
     return srcs
+
+
+def ensure_berry_generated(obk_root: Path):
+    gen_dir = obk_root / "libraries" / "berry" / "generate"
+    coc = obk_root / "libraries" / "berry" / "tools" / "coc" / "coc"
+    if (gen_dir / "be_const_strtab_def.h").exists() or not coc.exists():
+        return
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run([
+        sys.executable, str(coc),
+        "-o", str(gen_dir),
+        str(obk_root / "libraries" / "berry" / "src"),
+        str(obk_root / "src" / "berry" / "modules"),
+        "-c", str(obk_root / "include" / "berry_conf.h"),
+    ], check=True)
 
 
 def main():
@@ -87,6 +118,9 @@ def main():
     obj_dir = out / "obj"
     obj_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure Berry precompiled object headers exist
+    ensure_berry_generated(obk_root)
+
     # Ensure wifi_blobs.inc exists in build/obk (git-ignored)
     blobs_inc = out / "wifi_blobs.inc"
     if not blobs_inc.exists():
@@ -109,8 +143,11 @@ def main():
         f'-DUSER_SW_VER="{args.ver}"',
         f"-I{SDK / 'include' / 'obk_shim'}",
         f"-I{SDK / 'include'}",
+        f"-I{SDK / 'third_party' / 'fatfs'}",
         f"-I{out}",
+        f"-I{obk_root / 'include'}",
         f"-I{obk_root / 'src'}",
+        f"-I{obk_root / 'libraries' / 'berry' / 'src'}",
     ]
     sdk_cflags = common_flags + ["-Wall", "-Wextra", "-Wno-unused-parameter"]
     obk_cflags = common_flags + [
@@ -118,9 +155,13 @@ def main():
     ]
     asflags = build.as_flags("mips1")
 
-    sdk_exclude = {"httpd.c", "statuspage.c", "console.c", "diskio_usb.c"}
+    sdk_exclude = {"httpd.c", "statuspage.c", "console.c"}
     sdk_srcs = [
-        p for p in (sorted((SDK / "src").glob("*.S")) + sorted((SDK / "src").glob("*.c")))
+        p for p in (
+            sorted((SDK / "src").glob("*.S"))
+            + sorted((SDK / "src").glob("*.c"))
+            + sorted((SDK / "third_party" / "fatfs").glob("*.c"))
+        )
         if p.name not in sdk_exclude
     ]
     obk_srcs = parse_obk_sources(obk_root)
@@ -135,7 +176,7 @@ def main():
         tasks.append((src, obj, flags))
 
     for src in obk_srcs:
-        rel = src.relative_to(obk_root / "src")
+        rel = src.resolve().relative_to(obk_root.resolve())
         safe_name = "obk_" + "_".join(rel.parts).replace(".c", ".o")
         obj = obj_dir / safe_name
         objs.append(obj)
@@ -180,9 +221,9 @@ def main():
         str(gcc), *arch,
         "-nostdlib", "-nostartfiles", "-static",
         "-Wl,--build-id=none", "-Wl,--gc-sections",
-        f"-Wl,-T,{SDK / 'rtl8196c.ld'}",
         f"-Wl,--defsym=LOAD_ADDR={args.load}",
         f"-Wl,--defsym=STACK_TOP={args.stack}",
+        f"-Wl,-T,{SDK / 'rtl8196c.ld'}",
         f"-Wl,-Map,{mapf}",
         "-o", str(elf),
         *[str(o) for o in objs],

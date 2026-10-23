@@ -44,8 +44,10 @@ to your terminal.
 - [docs/02-bring-up-log.md](docs/02-bring-up-log.md): what was tried, in order
 - [docs/03-roadmap.md](docs/03-roadmap.md): partitions, OTA, RTOS, OpenBeken
 - [docs/04-flash.md](docs/04-flash.md): SPI flash, loader image format, backup, writing, partition plan
+- [docs/05-wifi-handover.md](docs/05-wifi-handover.md): RTL8192CE Wi-Fi bring-up, AP/STA drivers, and hardware notes
+- [docs/06-openbeken-vfs-ftp.md](docs/06-openbeken-vfs-ftp.md): Dual-homed OpenBeken Wi-Fi, unified LittleFS + USB (FAT/exFAT/NTFS) VFS, 10 MB streaming HTTP, FTP (`drv_ftp.c`), & SMB2 (`drv_smb.c`) server benchmarks
 
-## Status (2026-10-15)
+## Status (2026-10-17)
 
 Working on the LT-6408n board, all verified over the real UART and Ethernet:
 
@@ -66,7 +68,7 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 14_flash_backup | streams the 8 MB SPI flash over TCP port 9697 (`tools/flashdump.py`) |
 | 15_ota | DHCPv4 client + HTTP + TCP/UDP console + TCP OTA server on port 9698 (`tools/ota.py`) |
 | 16_stage2 | stage-2 A/B partition chooser (`cs6c` image for `0x010000`) |
-| OpenBeken (`build_obk.py`) | Full OpenBeken (`PLATFORM_RTL8196C`) firmware: Web UI, REST API, 7 router LEDs, 32 GPIOs, LittleFS, HTTP & TCP OTA, NTP, MQTT 3.1.1 |
+| OpenBeken (`build_obk.py`) | Full OpenBeken (`PLATFORM_RTL8196C`) firmware: Dual-homed Ethernet + Wi-Fi (STA & Soft-AP), Web UI, REST API, 7 router LEDs, 32 GPIOs, unified LittleFS + USB (`/usb0..3` FAT/exFAT/NTFS R/W) VFS, streaming HTTP `/api/lfs/`, FTP (`drv_ftp.c`), & SMB2 (`drv_smb.c`, `\\<ip>\obk`) servers, HTTP & TCP OTA, NTP, SSDP, Berry, MQTT 3.1.1 + Home Assistant Discovery |
 | 10_usb_probe | raw USB register diagnostics (superseded by 17) |
 | 17_usb_host | SDK USB host driver: power, PHY, EHCI + OHCI, hotplug, enumeration, descriptors |
 | 18_usb_mouse | reads a USB mouse over an interrupt endpoint: movement, buttons and scroll wheel (HID report descriptor parsed by `sdk/src/hid.c`) |

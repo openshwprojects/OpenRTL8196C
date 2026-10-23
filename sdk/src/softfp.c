@@ -53,6 +53,11 @@ int __clzdi2(uint64_t x)
     return hi ? __clzsi2(hi) : 32 + __clzsi2((uint32_t)x);
 }
 
+int __ffssi2(uint32_t x)
+{
+    return x ? (__ctzsi2(x) + 1) : 0;
+}
+
 int __ffsdi2(uint64_t x)
 {
     if (x == 0) return 0;
@@ -823,3 +828,22 @@ float acosf(float x)
     return M_PI_2_F - asinf(x);
 }
 double acos(double x) { return (double)acosf((float)x); }
+
+float sinhf(float x)
+{
+    return 0.5f * (expf(x) - expf(-x));
+}
+double sinh(double x) { return (double)sinhf((float)x); }
+
+float coshf(float x)
+{
+    return 0.5f * (expf(x) + expf(-x));
+}
+double cosh(double x) { return (double)coshf((float)x); }
+
+float tanhf(float x)
+{
+    float ep = expf(x), em = expf(-x);
+    return (ep - em) / (ep + em);
+}
+double tanh(double x) { return (double)tanhf((float)x); }

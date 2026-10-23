@@ -52,7 +52,7 @@ struct dma_area {
     uint32_t bqtd[EHCI_BULK_QTDS][8] __attribute__((aligned(32))); /* chained bulk qTDs, 16 KB each */
     uint32_t bed[4] __attribute__((aligned(16)));    /* OHCI bulk ED */
     uint32_t btd[2][4] __attribute__((aligned(16))); /* OHCI bulk TD + dummy tail */
-    uint8_t  bbuf[512] __attribute__((aligned(64)));  /* bounce buffer for small/unaligned bulk pieces */
+    uint8_t  bbuf[16384] __attribute__((aligned(64))); /* bounce buffer for small/unaligned bulk pieces */
 };
 static struct dma_area dma_mem __attribute__((aligned(4096)));
 static struct dma_area *D;                 /* uncached alias of dma_mem */
@@ -105,9 +105,12 @@ static uint32_t op;                        /* EHCI operational base */
 #define RH_CSC   (1u << 16)
 #define RH_PRSC  (1u << 20)
 
-static struct usb_dev dev;
+static struct usb_dev devs[USB_MAX_DEVS];
+#define dev (devs[0])
+static int dev_count;
+static int next_usb_addr;
 static struct usb_host_info info;
-static int on_ohci;                        /* current device is on the companion */
+static int on_ohci;                        /* root port is on the companion */
 
 struct usb_error_counts usb_errors;
 
@@ -184,14 +187,14 @@ static int ehci_async(int on)
     uint32_t c = RD(USBCMD);
     c = on ? (c | (1u << 5)) : (c & ~(1u << 5));
     WR(USBCMD, c);
-    for (int i = 0; i < 100; i++) {         /* wait for ASS to follow ASE */
+    for (int i = 0; i < 10000; i++) {       /* wait for ASS to follow ASE */
         if (((RD(USBSTS) >> 15) & 1u) == (uint32_t)on) return 0;
-        delay_us(100);
+        delay_us(1);
     }
     return -1;
 }
 
-static int ehci_control(int addr, int maxp, uint8_t *setup, int in, uint16_t len)
+static int ehci_control_dev(const struct usb_dev *d, int addr, int maxp, uint8_t *setup, int in, uint16_t len)
 {
     uint32_t *q0 = D->qtd[0], *q1 = D->qtd[1], *q2 = D->qtd[2];
     uint32_t *status;
@@ -205,11 +208,19 @@ static int ehci_control(int addr, int maxp, uint8_t *setup, int in, uint16_t len
         qtd_fill(q1, 0, 0, PID_IN, 0, 0, 1, 1);
         status = q1;
     }
+    uint32_t eps = 2u;
+    uint32_t c_flag = 0;
+    uint32_t qh2 = 1u << 30;
+    if (d && d->speed != USB_SPEED_HIGH) {
+        eps = (d->speed == USB_SPEED_LOW) ? 1u : 0u;
+        c_flag = 1u << 27;
+        qh2 |= ((uint32_t)d->hub_port << 23) | ((uint32_t)d->hub_addr << 16);
+    }
     uint32_t *qh = D->qh;
     memset(qh, 0, 64);
     qh[0] = LE32(PHYS(qh) | 2u);                                    /* loop to itself, type QH */
-    qh[1] = LE32((uint32_t)addr | (2u << 12) | (1u << 14) | (1u << 15) | ((uint32_t)maxp << 16));
-    qh[2] = LE32(1u << 30);
+    qh[1] = LE32((uint32_t)addr | (eps << 12) | (1u << 14) | (1u << 15) | ((uint32_t)maxp << 16) | c_flag);
+    qh[2] = LE32(qh2);
     qh[4] = LE32(PHYS(q0));
     qh[5] = LE32(1u);
     WR(ASYNCLB, PHYS(qh));
@@ -218,17 +229,17 @@ static int ehci_control(int addr, int maxp, uint8_t *setup, int in, uint16_t len
     int rc = -1;
     for (int t = 0; t < 500; t++) {
         uint32_t s = LE32(status[2]);
-        uint32_t d = len ? LE32(q1[2]) : 0;
-        if ((LE32(q0[2]) | d | s) & QTD_HALTED) { rc = -2; break; }
+        uint32_t d_tok = len ? LE32(q1[2]) : 0;
+        if ((LE32(q0[2]) | d_tok | s) & QTD_HALTED) { rc = -2; break; }
         if (!(s & QTD_ACTIVE)) {
-            rc = len ? (int)len - (int)((d >> 16) & 0x7FFFu) : 0;
+            rc = len ? (int)len - (int)((d_tok >> 16) & 0x7FFFu) : 0;
             break;
         }
         delay_ms(1);
     }
     ehci_async(0);
     if (rc < 0)
-        DBG("usb: ehci xfer rc=%d tok %08x %08x %08x sts %08x\n", rc,
+        DBG("usb: ehci xfer addr=%d rc=%d tok %08x %08x %08x sts %08x\n", addr, rc,
             LE32(q0[2]), LE32(q1[2]), LE32(q2[2]), RD(USBSTS));
     return rc;
 }
@@ -296,8 +307,8 @@ static int ohci_control(int addr, int lowspeed, int maxp, uint8_t *setup, int in
 }
 
 /* ------------------------------------------------------ control front end */
-static int ctl(int addr, uint8_t bmReq, uint8_t bReq, uint16_t wValue, uint16_t wIndex,
-               uint16_t wLen, void *data)
+static int ctl_dev(const struct usb_dev *d, int addr, uint8_t bmReq, uint8_t bReq,
+                   uint16_t wValue, uint16_t wIndex, uint16_t wLen, void *data)
 {
     if (wLen > XFER_MAX) wLen = XFER_MAX;
     uint8_t *s = D->setup;
@@ -307,24 +318,30 @@ static int ctl(int addr, uint8_t bmReq, uint8_t bReq, uint16_t wValue, uint16_t 
     s[6] = (uint8_t)wLen;   s[7] = (uint8_t)(wLen >> 8);
     int in = (bmReq & 0x80) != 0;
     if (!in && wLen && data) memcpy(D->buf, data, wLen);
-    int rc = on_ohci ? ohci_control(addr, dev.speed == USB_SPEED_LOW, dev.maxp0, s, in, wLen)
-                     : ehci_control(addr, dev.maxp0, s, in, wLen);
+    int rc = on_ohci ? ohci_control(addr, d->speed == USB_SPEED_LOW, d->maxp0, s, in, wLen)
+                     : ehci_control_dev(d, addr, d->maxp0, s, in, wLen);
     if (in && rc > 0 && data) memcpy(data, D->buf, (uint32_t)rc);
     return rc;
 }
 
-int usb_control(uint8_t bmReq, uint8_t bReq, uint16_t wValue, uint16_t wIndex, uint16_t wLen, void *data)
+int usb_control_dev(const struct usb_dev *d, uint8_t bmReq, uint8_t bReq,
+                    uint16_t wValue, uint16_t wIndex, uint16_t wLen, void *data)
 {
-    if (!dev.present) return -10;
-    return ctl(dev.addr, bmReq, bReq, wValue, wIndex, wLen, data);
+    if (!d || !d->present) return -10;
+    return ctl_dev(d, d->addr, bmReq, bReq, wValue, wIndex, wLen, data);
 }
 
-static void get_string(int addr, uint8_t idx, char *out, unsigned max)
+int usb_control(uint8_t bmReq, uint8_t bReq, uint16_t wValue, uint16_t wIndex, uint16_t wLen, void *data)
+{
+    return usb_control_dev(&dev, bmReq, bReq, wValue, wIndex, wLen, data);
+}
+
+static void get_string_dev(const struct usb_dev *d, uint8_t idx, char *out, unsigned max)
 {
     uint8_t b[128];
     out[0] = 0;
     if (!idx) return;
-    int n = ctl(addr, 0x80, 6, (uint16_t)(0x0300 | idx), 0x0409, sizeof b, b);
+    int n = ctl_dev(d, d->addr, 0x80, 6, (uint16_t)(0x0300 | idx), 0x0409, sizeof b, b);
     if (n < 2) return;
     if (b[0] < n) n = b[0];
     unsigned o = 0;
@@ -333,37 +350,56 @@ static void get_string(int addr, uint8_t idx, char *out, unsigned max)
     out[o] = 0;
 }
 
-static uint8_t toggles[16][2];
+static uint8_t toggles[USB_MAX_DEVS + 1][16][2];
+
+static int enumerate_dev(struct usb_dev *d, int assign_addr)
+{
+    uint8_t d8[8];
+    if (assign_addr >= 0 && assign_addr <= USB_MAX_DEVS)
+        memset(toggles[assign_addr], 0, sizeof toggles[0]);
+    d->addr = 0;
+    d->maxp0 = d->speed == USB_SPEED_HIGH ? 64 : 8;
+    int n = ctl_dev(d, 0, 0x80, 6, 0x0100, 0, 8, d8);
+    if (n < 8) { DBG("usb: get_descriptor(8) failed %d\n", n); return -1; }
+    d->maxp0 = d8[7] ? d8[7] : 8;
+    if (ctl_dev(d, 0, 0x00, 5, (uint16_t)assign_addr, 0, 0, 0) < 0) {
+        DBG("usb: set_address(%d) failed\n", assign_addr);
+        return -2;
+    }
+    delay_ms(20);
+    d->addr = assign_addr;
+    n = ctl_dev(d, assign_addr, 0x80, 6, 0x0100, 0, 18, d->dev_desc);
+    if (n < 18) { DBG("usb: get_descriptor(18) failed %d\n", n); return -3; }
+    d->vid = (uint16_t)(d->dev_desc[8] | (d->dev_desc[9] << 8));
+    d->pid = (uint16_t)(d->dev_desc[10] | (d->dev_desc[11] << 8));
+    uint8_t c9[9];
+    if (ctl_dev(d, assign_addr, 0x80, 6, 0x0200, 0, 9, c9) >= 9) {
+        uint16_t total = (uint16_t)(c9[2] | (c9[3] << 8));
+        if (total > USB_CFG_MAX) total = USB_CFG_MAX;
+        n = ctl_dev(d, assign_addr, 0x80, 6, 0x0200, 0, total, d->cfg_desc);
+        d->cfg_len = n > 0 ? (uint16_t)n : 0;
+    }
+    get_string_dev(d, d->dev_desc[14], d->manufacturer, sizeof d->manufacturer);
+    get_string_dev(d, d->dev_desc[15], d->product, sizeof d->product);
+    get_string_dev(d, d->dev_desc[16], d->serial, sizeof d->serial);
+    if (d->cfg_len >= 9)
+        ctl_dev(d, assign_addr, 0x00, 9, d->cfg_desc[5], 0, 0, 0); /* SET_CONFIGURATION */
+    d->is_hub = (d->dev_desc[4] == 0x09);
+    d->present = 1;
+    return 0;
+}
 
 static int enumerate(void)
 {
-    uint8_t d8[8];
+    uint8_t root_speed = dev.speed;
+    memset(devs, 0, sizeof devs);
     memset(toggles, 0, sizeof toggles);
-    dev.addr = 0;
-    dev.maxp0 = dev.speed == USB_SPEED_HIGH ? 64 : 8;
-    int n = ctl(0, 0x80, 6, 0x0100, 0, 8, d8);
-    if (n < 8) { DBG("usb: get_descriptor(8) failed %d\n", n); return -1; }
-    dev.maxp0 = d8[7] ? d8[7] : 8;
-    if (ctl(0, 0x00, 5, 1, 0, 0, 0) < 0) { DBG("usb: set_address failed\n"); return -2; }
-    delay_ms(20);
-    dev.addr = 1;
-    n = ctl(1, 0x80, 6, 0x0100, 0, 18, dev.dev_desc);
-    if (n < 18) { DBG("usb: get_descriptor(18) failed %d\n", n); return -3; }
-    dev.vid = (uint16_t)(dev.dev_desc[8] | (dev.dev_desc[9] << 8));
-    dev.pid = (uint16_t)(dev.dev_desc[10] | (dev.dev_desc[11] << 8));
-    uint8_t c9[9];
-    if (ctl(1, 0x80, 6, 0x0200, 0, 9, c9) >= 9) {
-        uint16_t total = (uint16_t)(c9[2] | (c9[3] << 8));
-        if (total > USB_CFG_MAX) total = USB_CFG_MAX;
-        n = ctl(1, 0x80, 6, 0x0200, 0, total, dev.cfg_desc);
-        dev.cfg_len = n > 0 ? (uint16_t)n : 0;
-    }
-    get_string(1, dev.dev_desc[14], dev.manufacturer, sizeof dev.manufacturer);
-    get_string(1, dev.dev_desc[15], dev.product, sizeof dev.product);
-    get_string(1, dev.dev_desc[16], dev.serial, sizeof dev.serial);
-    if (dev.cfg_len >= 9)
-        ctl(1, 0x00, 9, dev.cfg_desc[5], 0, 0, 0);                 /* SET_CONFIGURATION */
-    dev.present = 1;
+    dev_count = 0;
+    next_usb_addr = 1;
+    devs[0].speed = root_speed;
+    int rc = enumerate_dev(&devs[0], next_usb_addr++);
+    if (rc < 0) return rc;
+    dev_count = 1;
     return 0;
 }
 
@@ -438,8 +474,24 @@ void usb_vbus(int on)
 const struct usb_dev *usb_dev(void) { return &dev; }
 const struct usb_host_info *usb_info(void) { return &info; }
 
+int usb_dev_count(void) { return dev_count; }
+
+const struct usb_dev *usb_get_dev(int idx)
+{
+    if (idx < 0 || idx >= dev_count) return 0;
+    return &devs[idx];
+}
+
+const struct usb_dev *usb_dev_by_addr(int addr)
+{
+    for (int i = 0; i < dev_count; i++)
+        if (devs[i].present && devs[i].addr == addr)
+            return &devs[i];
+    return 0;
+}
+
 /* -------------------------------------------------------- bulk transfers */
-/* toggles[endpoint number][in] holds the data toggle, reset on enumeration */
+/* toggles[addr][endpoint number][in] holds the data toggle, reset on enumeration */
 
 /*
  * Up to USB_BULK_MAX bytes as a chain of 16 KB qTDs, so the async schedule
@@ -447,9 +499,11 @@ const struct usb_host_info *usb_info(void) { return &info; }
  * short IN packet the controller follows the (invalid) alternate pointer and
  * stops: the qTDs after the short one stay active and are simply ignored.
  */
-static int ehci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+static int ehci_bulk_dev(const struct usb_dev *d, uint8_t ep, uint16_t maxp,
+                         uint8_t *buf, uint32_t len, uint32_t timeout_ms)
 {
     int in = (ep & 0x80) != 0, num = ep & 0x0F;
+    int addr = d->addr;
     uint32_t *qh = D->bqh;
     int nq = len ? (int)((len + 16383u) / 16384u) : 1;
     for (int i = 0; i < nq; i++) {
@@ -458,14 +512,20 @@ static int ehci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint
         qtd_fill(D->bqtd[i], i + 1 < nq ? PHYS(D->bqtd[i + 1]) : 0, 0, in ? PID_IN : PID_OUT,
                  len ? buf + off : 0, len ? n : 0, 0, i + 1 == nq);
     }
+    uint32_t eps = 2u;
+    uint32_t qh2 = 1u << 30;
+    if (d->speed != USB_SPEED_HIGH) {
+        eps = (d->speed == USB_SPEED_LOW) ? 1u : 0u;
+        qh2 |= ((uint32_t)d->hub_port << 23) | ((uint32_t)d->hub_addr << 16);
+    }
     memset(qh, 0, 64);
     qh[0] = LE32(PHYS(qh) | 2u);
     /* DTC = 0: the queue head keeps the data toggle, seeded from our copy */
-    qh[1] = LE32((uint32_t)dev.addr | ((uint32_t)num << 8) | (2u << 12) | (1u << 15) | ((uint32_t)maxp << 16));
-    qh[2] = LE32(1u << 30);
+    qh[1] = LE32((uint32_t)addr | ((uint32_t)num << 8) | (eps << 12) | (1u << 15) | ((uint32_t)maxp << 16));
+    qh[2] = LE32(qh2);
     qh[4] = LE32(PHYS(D->bqtd[0]));
     qh[5] = LE32(1u);
-    qh[6] = LE32((uint32_t)toggles[num][in] << 31);
+    qh[6] = LE32((uint32_t)toggles[addr][num][in] << 31);
     WR(ASYNCLB, PHYS(qh));
     ehci_async(1);
     int rc = -1, cur = 0;
@@ -485,15 +545,18 @@ static int ehci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint
         if (elapsed_us(t0) > timeout_ms * 1000u) { rc = -3; break; }
     }
     ehci_async(0);
-    toggles[num][in] = (uint8_t)(LE32(qh[6]) >> 31);
+    toggles[addr][num][in] = (uint8_t)(LE32(qh[6]) >> 31);
     if (rc < 0)
-        DBG("usb: ehci bulk ep %02x len %u rc %d qtd %d token %08x\n", ep, len, rc, cur, LE32(D->bqtd[cur][2]));
+        DBG("usb: ehci bulk addr %d ep %02x len %u rc %d qtd %d token %08x\n",
+            addr, ep, len, rc, cur, LE32(D->bqtd[cur][2]));
     return rc;
 }
 
-static int ohci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+static int ohci_bulk_dev(const struct usb_dev *d, uint8_t ep, uint16_t maxp,
+                         uint8_t *buf, uint32_t len, uint32_t timeout_ms)
 {
     int in = (ep & 0x80) != 0, num = ep & 0x0F;
+    int addr = d->addr;
     uint32_t (*td)[4] = D->btd;
     uint32_t b = PHYS(buf);                       /* <= 4 KB per TD: spans at most two pages */
     memset(td, 0, sizeof D->btd);
@@ -506,9 +569,9 @@ static int ohci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint
 
     WR(OHCI_CONTROL, RD(OHCI_CONTROL) & ~(1u << 5));                /* BLE off while editing */
     delay_us(1100);
-    D->bed[0] = LE32((uint32_t)dev.addr | ((uint32_t)num << 7) | ((uint32_t)maxp << 16));
+    D->bed[0] = LE32((uint32_t)addr | ((uint32_t)num << 7) | ((uint32_t)maxp << 16));
     D->bed[1] = LE32(tailp);
-    D->bed[2] = LE32(PHYS(td[0]) | ((uint32_t)toggles[num][in] << 1));
+    D->bed[2] = LE32(PHYS(td[0]) | ((uint32_t)toggles[addr][num][in] << 1));
     D->bed[3] = 0;
     WR(OHCI_BULKHEAD, PHYS(D->bed));
     WR(OHCI_BULKCUR, 0);
@@ -528,18 +591,20 @@ static int ohci_bulk(uint8_t ep, uint16_t maxp, uint8_t *buf, uint32_t len, uint
         if (elapsed_us(t0) > timeout_ms * 1000u) { rc = -3; break; }
     }
     WR(OHCI_CONTROL, RD(OHCI_CONTROL) & ~(1u << 5));
-    toggles[num][in] = (uint8_t)((LE32(D->bed[2]) >> 1) & 1u);
+    toggles[addr][num][in] = (uint8_t)((LE32(D->bed[2]) >> 1) & 1u);
     if (rc < 0)
-        DBG("usb: ohci bulk ep %02x len %u rc %d cc %x\n", ep, len, rc, TD_CC(LE32(td[0][0])));
+        DBG("usb: ohci bulk addr %d ep %02x len %u rc %d cc %x\n",
+            addr, ep, len, rc, TD_CC(LE32(td[0][0])));
     return rc;
 }
 
 struct usb_bulk_stats usb_bulk_stats;
 int usb_zero_copy = 1;
 
-int usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeout_ms)
+int usb_bulk_dev(const struct usb_dev *d, uint8_t ep, uint16_t maxp,
+                 void *data, uint32_t len, uint32_t timeout_ms)
 {
-    if (!dev.present) return -10;
+    if (!d || !d->present) return -10;
     int in = (ep & 0x80) != 0;
     /* Zero copy: the controller moves data straight to/from the caller's
      * buffer.  The D-cache is write-back, so dirty lines are written back
@@ -548,7 +613,8 @@ int usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeo
      * Direct buffers must cover whole cache lines (32-byte aligned start and
      * length), so no unrelated variable shares a line with DMA data; small
      * or unaligned pieces (CBW, CSW, sense data) use the bounce buffer. */
-    int direct = usb_zero_copy && data && (((uint32_t)data | len) & 31u) == 0 && len >= 512;
+    int kseg1 = (((uint32_t)data >> 29) == 5u);
+    int direct = usb_zero_copy && data && ((!on_ohci && kseg1) || ((((uint32_t)data | len) & 31u) == 0 && len >= 512));
     uint32_t chunk_max = !direct ? sizeof D->bbuf : on_ohci ? 4096u : USB_BULK_MAX;
     uint32_t done = 0;
     uint8_t *p = data;
@@ -557,12 +623,13 @@ int usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeo
         if (n > chunk_max) n = chunk_max;
         uint8_t *buf = direct ? p + done : D->bbuf;
         uint32_t t0 = micros();
-        if (direct) cctl_write(in ? CCTL_DWBINVAL : CCTL_DWB);
-        else if (!in && n) memcpy(D->bbuf, p + done, n);
+        if (direct && !kseg1) cctl_write(in ? CCTL_DWBINVAL : CCTL_DWB);
+        else if (!direct && !in && n) memcpy(D->bbuf, p + done, n);
         uint32_t t1 = micros();
-        int rc = on_ohci ? ohci_bulk(ep, maxp, buf, n, timeout_ms) : ehci_bulk(ep, maxp, buf, n, timeout_ms);
+        int rc = on_ohci ? ohci_bulk_dev(d, ep, maxp, buf, n, timeout_ms)
+                         : ehci_bulk_dev(d, ep, maxp, buf, n, timeout_ms);
         uint32_t t2 = micros();
-        if (in && direct) cctl_write(CCTL_DWBINVAL);                /* drop lines read during the transfer */
+        if (in && direct && !kseg1) cctl_write(CCTL_DWBINVAL);       /* drop lines read during the transfer */
         if (rc < 0) return done ? (int)done : rc;
         if (in && rc > 0 && !direct) memcpy(p + done, D->bbuf, (uint32_t)rc);
         uint32_t t3 = micros();
@@ -576,11 +643,23 @@ int usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeo
     return (int)done;
 }
 
+int usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeout_ms)
+{
+    return usb_bulk_dev(&dev, ep, maxp, data, len, timeout_ms);
+}
+
+int usb_clear_halt_dev(const struct usb_dev *d, uint8_t ep)
+{
+    if (!d || !d->present) return -10;
+    int rc = usb_control_dev(d, 0x02, 0x01, 0, ep, 0, 0);           /* CLEAR_FEATURE(ENDPOINT_HALT) */
+    if (d->addr >= 0 && d->addr <= USB_MAX_DEVS)
+        toggles[d->addr][ep & 0x0F][(ep & 0x80) != 0] = 0;
+    return rc;
+}
+
 int usb_clear_halt(uint8_t ep)
 {
-    int rc = usb_control(0x02, 0x01, 0, ep, 0, 0);                  /* CLEAR_FEATURE(ENDPOINT_HALT) */
-    toggles[ep & 0x0F][(ep & 0x80) != 0] = 0;
-    return rc;
+    return usb_clear_halt_dev(&dev, ep);
 }
 
 /* -------------------------------------------- interrupt IN (OHCI periodic) */
@@ -666,12 +745,13 @@ void usb_intr_debug(void)
     printf("\n");
 }
 
-int usb_find_endpoint(uint8_t cls, uint8_t type, int in, struct usb_ep_info *out)
+int usb_find_endpoint_dev(const struct usb_dev *d, uint8_t cls, uint8_t type, int in, struct usb_ep_info *out)
 {
-    const uint8_t *c = dev.cfg_desc;
+    if (!d || !d->present) return -1;
+    const uint8_t *c = d->cfg_desc;
     int cur_iface = -1, match = 0;
     uint8_t sub = 0, proto = 0;
-    for (unsigned i = 0; i + 1 < dev.cfg_len; ) {
+    for (unsigned i = 0; i + 1 < d->cfg_len; ) {
         uint8_t len = c[i], t = c[i + 1];
         if (len < 2) break;
         if (t == 4 && len >= 9) {
@@ -692,6 +772,126 @@ int usb_find_endpoint(uint8_t cls, uint8_t type, int in, struct usb_ep_info *out
         i += len;
     }
     return -1;
+}
+
+int usb_find_endpoint(uint8_t cls, uint8_t type, int in, struct usb_ep_info *out)
+{
+    return usb_find_endpoint_dev(&dev, cls, type, in, out);
+}
+
+/* ----------------------------------------------------- USB Hub support */
+/* Standard USB 2.0 Hub class requests (bmRequestType 0xA0/0xA3/0x23) */
+#define HUB_FEAT_PORT_RESET      4u
+#define HUB_FEAT_PORT_POWER      8u
+#define HUB_FEAT_C_PORT_CONNECT  16u
+#define HUB_FEAT_C_PORT_ENABLE   17u
+#define HUB_FEAT_C_PORT_RESET    20u
+
+int usb_hub_scan_all(void)
+{
+    int added = 0;
+    for (int h = 0; h < dev_count; h++) {
+        struct usb_dev *hub = &devs[h];
+        if (!hub->present || !hub->is_hub)
+            continue;
+
+        if (hub->hub_nports == 0) {
+            uint8_t hdesc[16];
+            memset(hdesc, 0, sizeof hdesc);
+            int hn = usb_control_dev(hub, 0xA0, 0x06, 0x2900, 0, 9, hdesc);
+            if (hn < 3)
+                hn = usb_control_dev(hub, 0xA0, 0x06, 0x0000, 0, 9, hdesc);
+            int nports = (hn >= 3 && hdesc[2] >= 1 && hdesc[2] <= 7) ? hdesc[2] : 4;
+            hub->hub_nports = (uint8_t)nports;
+            uint32_t pwr_ms = (hn >= 6 ? (uint32_t)hdesc[5] * 2u : 100u);
+            if (pwr_ms < 100u) pwr_ms = 100u;
+
+            DBG("usb hub (addr=%d): %d ports, power-on delay %u ms\n", hub->addr, nports, pwr_ms);
+            for (int port = 1; port <= nports; port++)
+                usb_control_dev(hub, 0x23, 0x03, HUB_FEAT_PORT_POWER, (uint16_t)port, 0, 0);
+            delay_ms(pwr_ms + 250u);
+        }
+
+        for (int port = 1; port <= hub->hub_nports; port++) {
+            uint8_t pst[4];
+            memset(pst, 0, sizeof pst);
+            if (usb_control_dev(hub, 0xA3, 0x00, 0, (uint16_t)port, 4, pst) < 4)
+                continue;
+            uint16_t status = (uint16_t)(pst[0] | (pst[1] << 8));
+            uint16_t change = (uint16_t)(pst[2] | (pst[3] << 8));
+
+            /* Check if we already enumerated a device on this (hub, port) */
+            struct usb_dev *existing = 0;
+            for (int k = 1; k < dev_count; k++) {
+                if (devs[k].hub_addr == hub->addr && devs[k].hub_port == port) {
+                    existing = &devs[k];
+                    break;
+                }
+            }
+            if (!(status & 0x0001u)) {
+                if (existing && existing->present) {
+                    DBG("usb hub (addr=%d) port %d: device (addr=%d) removed\n",
+                        hub->addr, port, existing->addr);
+                    existing->present = 0;
+                }
+                if (change & 0x0001u)
+                    usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_CONNECT, (uint16_t)port, 0, 0);
+                continue;
+            }
+            if (existing && existing->present)
+                continue;
+
+            if (dev_count >= USB_MAX_DEVS && !existing)
+                break;
+
+            /* Clear C_PORT_CONNECTION, debounce, and reset downstream port */
+            usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_CONNECT, (uint16_t)port, 0, 0);
+            delay_ms(100);
+            usb_control_dev(hub, 0x23, 0x03, HUB_FEAT_PORT_RESET, (uint16_t)port, 0, 0);
+
+            int reset_ok = 0;
+            for (int t = 0; t < 60; t++) {
+                delay_ms(10);
+                if (usb_control_dev(hub, 0xA3, 0x00, 0, (uint16_t)port, 4, pst) < 4)
+                    break;
+                status = (uint16_t)(pst[0] | (pst[1] << 8));
+                change = (uint16_t)(pst[2] | (pst[3] << 8));
+                if (!(status & 0x0010u) && ((status & 0x0002u) || (change & 0x0010u))) {
+                    reset_ok = 1;
+                    break;
+                }
+            }
+            usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_RESET, (uint16_t)port, 0, 0);
+            if (!reset_ok || !(status & 0x0002u)) {
+                DBG("usb hub (addr=%d) port %d: reset failed (status=%04x change=%04x)\n",
+                    hub->addr, port, status, change);
+                continue;
+            }
+            delay_ms(40); /* TRSTRCY: recovery time before addressing 0 */
+
+            struct usb_dev *child = existing ? existing : &devs[dev_count];
+            int assign = (existing && existing->addr > 1) ? existing->addr : next_usb_addr++;
+            memset(child, 0, sizeof *child);
+            if (status & (1u << 9))
+                child->speed = USB_SPEED_LOW;
+            else if (status & (1u << 10))
+                child->speed = USB_SPEED_HIGH;
+            else
+                child->speed = USB_SPEED_FULL;
+            child->hub_addr = (uint8_t)hub->addr;
+            child->hub_port = (uint8_t)port;
+
+            int rc = enumerate_dev(child, assign);
+            if (rc == 0) {
+                if (!existing)
+                    dev_count++;
+                added++;
+            } else {
+                DBG("usb hub (addr=%d) port %d: enumerate failed (%d)\n", hub->addr, port, rc);
+            }
+        }
+    }
+    return added;
 }
 
 static void release_companion(void)
@@ -720,7 +920,8 @@ int usb_poll(void)
                    p, o, RD(OHCI_CONTROL), RD(OHCI_INTSTATUS));
         }
         usb_intr_close();
-        memset(&dev, 0, sizeof dev);
+        memset(devs, 0, sizeof devs);
+        dev_count = 0;
         if (on_ohci) WR(OHCI_RHPORT1, RH_CSC);
         WR(PORTSC, p & ~PS_PO);                  /* also acks CSC/PEC/OCC */
         on_ohci = 0;
@@ -782,11 +983,14 @@ int usb_poll(void)
 
 done:
     if (rc < 0) {
-        memset(&dev, 0, sizeof dev);
+        memset(devs, 0, sizeof devs);
+        dev_count = 0;
         on_ohci = 0;
         release_companion();                     /* next attempt starts on EHCI again */
         return USB_EV_ENUM_FAILED;
     }
+    if (dev.is_hub)
+        usb_hub_scan_all();
     gpio_write(GPIO_C3_USB_LED, 0);
     return USB_EV_CONNECTED;
 }
@@ -824,9 +1028,16 @@ const char *usb_class_name(uint8_t c)
 void usb_print_dev(const struct usb_dev *d)
 {
     const uint8_t *dd = d->dev_desc;
-    printf("usb device: %04x:%04x  %s speed  USB %x.%02x  class %02x/%02x/%02x (%s)  ep0 maxp %d\n",
-           d->vid, d->pid, usb_speed_name(d->speed), dd[3], dd[2], dd[4], dd[5], dd[6],
-           usb_class_name(dd[4]), d->maxp0);
+    if (d->hub_addr)
+        printf("usb device [addr %d, hub %u port %u]: %04x:%04x  %s speed  USB %x.%02x  class %02x/%02x/%02x (%s)  ep0 maxp %d\n",
+               d->addr, d->hub_addr, d->hub_port, d->vid, d->pid, usb_speed_name(d->speed),
+               dd[3], dd[2], dd[4], dd[5], dd[6], usb_class_name(dd[4]), d->maxp0);
+    else
+        printf("usb device [addr %d, root]: %04x:%04x  %s speed  USB %x.%02x  class %02x/%02x/%02x (%s)  ep0 maxp %d\n",
+               d->addr, d->vid, d->pid, usb_speed_name(d->speed),
+               dd[3], dd[2], dd[4], dd[5], dd[6], usb_class_name(dd[4]), d->maxp0);
+    if (d->is_hub && d->hub_nports)
+        printf("  hub ports:    %u downstream ports\n", d->hub_nports);
     if (d->manufacturer[0]) printf("  manufacturer: %s\n", d->manufacturer);
     if (d->product[0])      printf("  product:      %s\n", d->product);
     if (d->serial[0])       printf("  serial:       %s\n", d->serial);

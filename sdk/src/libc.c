@@ -44,14 +44,11 @@ void *memmove(void *dst, const void *src, size_t n)
 {
     unsigned char *d = dst;
     const unsigned char *s = src;
-    if (d < s) {
-        while (n--)
-            *d++ = *s++;
-    } else {
-        d += n; s += n;
-        while (n--)
-            *--d = *--s;
-    }
+    if (d <= s)
+        return memcpy(dst, src, n);
+    d += n; s += n;
+    while (n--)
+        *--d = *--s;
     return dst;
 }
 
@@ -752,4 +749,15 @@ uint32_t crc32_update(uint32_t crc, const void *data, size_t len)
 uint32_t crc32(const void *data, size_t len)
 {
     return crc32_update(0, data, len);
+}
+
+void abort(void)
+{
+    while (1) { }
+}
+
+void exit(int status)
+{
+    (void)status;
+    while (1) { }
 }

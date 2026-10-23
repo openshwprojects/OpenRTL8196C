@@ -25,13 +25,18 @@ enum {
     USB_EV_ENUM_FAILED,     /* something is attached but did not answer */
 };
 
-#define USB_CFG_MAX 512
+#define USB_CFG_MAX  512
+#define USB_MAX_DEVS 8
 
 struct usb_dev {
     int      present;
     int      speed;           /* USB_SPEED_* */
     int      addr;
     int      maxp0;
+    uint8_t  hub_addr;        /* 0 = root port, >0 = parent hub USB address */
+    uint8_t  hub_port;        /* 0 = root port, 1..N = parent hub downstream port */
+    uint8_t  is_hub;          /* 1 = USB hub (bDeviceClass == 0x09) */
+    uint8_t  hub_nports;      /* number of downstream ports if is_hub */
     uint16_t vid, pid;
     uint8_t  dev_desc[18];
     uint8_t  cfg_desc[USB_CFG_MAX];
@@ -52,10 +57,18 @@ int  usb_poll(void);                     /* returns USB_EV_*; does enumeration w
 const struct usb_dev *usb_dev(void);
 const struct usb_host_info *usb_info(void);
 
+/* Multi-device & USB hub API */
+int  usb_dev_count(void);
+const struct usb_dev *usb_get_dev(int idx);
+const struct usb_dev *usb_dev_by_addr(int addr);
+int  usb_hub_scan_all(void);             /* powers & enumerates downstream ports on any attached hub(s) */
+
 /* control transfer on the attached device; returns bytes transferred (IN)
  * or 0 (OUT/no data), negative on error */
 int  usb_control(uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue,
                  uint16_t wIndex, uint16_t wLength, void *data);
+int  usb_control_dev(const struct usb_dev *d, uint8_t bmRequestType, uint8_t bRequest,
+                     uint16_t wValue, uint16_t wIndex, uint16_t wLength, void *data);
 
 /* bulk transfer on endpoint ep (bit 7 = IN); any length, split into
  * controller-sized pieces.  Returns bytes transferred (a short IN packet
@@ -63,7 +76,10 @@ int  usb_control(uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue,
  * timeout, other negatives on error. */
 #define USB_BULK_MAX 65536            /* bytes per controller transfer (EHCI: 4 chained qTDs) */
 int  usb_bulk(uint8_t ep, uint16_t maxp, void *data, uint32_t len, uint32_t timeout_ms);
+int  usb_bulk_dev(const struct usb_dev *d, uint8_t ep, uint16_t maxp,
+                  void *data, uint32_t len, uint32_t timeout_ms);
 int  usb_clear_halt(uint8_t ep);
+int  usb_clear_halt_dev(const struct usb_dev *d, uint8_t ep);
 
 struct usb_bulk_stats { uint32_t transfers, bytes, us_xfer, us_copy; };
 extern struct usb_bulk_stats usb_bulk_stats;   /* where bulk time goes: on the bus vs copying */
@@ -84,6 +100,7 @@ struct usb_ep_info {
     uint16_t maxp;
 };
 int  usb_find_endpoint(uint8_t cls, uint8_t type, int in, struct usb_ep_info *out);
+int  usb_find_endpoint_dev(const struct usb_dev *d, uint8_t cls, uint8_t type, int in, struct usb_ep_info *out);
 
 /* helpers */
 const char *usb_class_name(uint8_t cls);

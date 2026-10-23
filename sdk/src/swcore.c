@@ -276,8 +276,13 @@ int eth_send(const void *frame, uint32_t len, uint8_t portmask)
 {
     eth_tx_reclaim();
     unsigned next = (tx_idx + 1) % ETH_TX_RING;
-    if (next == tx_done_idx)
-        return -1;                                  /* ring full */
+    if (next == tx_done_idx) {
+        uint32_t t0 = micros();
+        while (next == tx_done_idx && (uint32_t)(micros() - t0) < 2000u)
+            eth_tx_reclaim();
+        if (next == tx_done_idx)
+            return -1;                              /* ring full */
+    }
     if ((tx_ring[tx_idx] & DESC_OWNED_BIT) != DESC_RISC_OWNED)
         return -1;
     if (len > ETH_CLUSTER - 4)

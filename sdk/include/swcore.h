@@ -122,8 +122,8 @@ struct pkthdr {
 };
 
 /* ---- API ---- */
-#define ETH_RX_RING   8
-#define ETH_TX_RING   4
+#define ETH_RX_RING   32
+#define ETH_TX_RING   32
 #define ETH_CLUSTER   2048
 
 void     eth_init(const uint8_t mac[6]);

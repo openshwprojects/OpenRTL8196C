@@ -14,7 +14,7 @@
 
 #define TCP_MAX_LISTEN  8
 #define TCP_MAX_CONN    16
-#define TCP_SNDBUF      8192
+#define TCP_SNDBUF      32768
 #define TCP_MSS         1400
 #define TCP_RTX_MS      300
 #define TCP_MAX_RETRIES 8

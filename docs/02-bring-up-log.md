@@ -632,3 +632,44 @@ Ported OpenBeken (`C:\GIT\OpenBK7231T_App`) to the RTL8196C:
 - Diagnostics still in the build: RCR AICV (undecryptable frames delivered
   and counted), `wl_sta_trace` prints the first 8 data frames. Remove or
   default off once the code settles.
+
+## 2026-10-17 - MILESTONE: Dual-homed OpenBeken (Ethernet + Wi-Fi STA/AP), Unified USB/LittleFS VFS, 10 MB Streaming HTTP & FTP Server
+
+- **Dual-homed OpenBeken networking (`hal_wifi_rtl8196c.c`, `sdk/src/net.c`)**:
+  Extended `net.c` with a secondary `wifi_link` interface so Ethernet
+  (`192.168.0.134` / `192.168.0.196`) and Wi-Fi (`wl_sta.c` WPA2-PSK station or
+  `wl_ap.c` Soft-AP at `192.168.4.1`) operate simultaneously. Wired up
+  OpenBeken's Wi-Fi site survey (`cfg_wifi?scan=1`), SSDP (`239.255.255.250:1900`),
+  NTP, Berry scripting, and MQTT 3.1.1 with Home Assistant auto-discovery.
+- **Unified LittleFS + Multi-USB VFS (`hal_vfs_rtl8196c.c` / `hal_vfs_rtl8196c.h`)**:
+  Extended `ntfs.c` with full NTFS write/create/overwrite/delete/mkdir/rename
+  support (`$Bitmap` cluster allocation, non-resident data runs, INDX B-tree
+  updates) alongside FatFs (`FAT12/16/32/exFAT`) and SPI Flash LittleFS.
+  Redirected OpenBeken's `lfs_*` calls to `obk_vfs_*` so `/` shows LittleFS
+  files plus virtual `usb0`..`usb3` directories for all attached USB drives
+  (`/usb0` 58 GB NTFS, `/usb1` 1 GB FAT16, `/usb2` 1 GB FAT32 via USB 2.0 hub).
+- **Zero-RAM-buffering HTTP `/api/lfs/` & VFS streaming (`http_fns.c`)**:
+  Replaced whole-file heap allocation in `GET /api/lfs/` and `POST /api/lfs/`
+  with 4 KB chunked streaming. Verified with a 10 MB (`10,485,760` B) JPEG
+  written and streamed back over HTTP 5x and 20x in a loop: raw VFS write
+  `1,070.9 KB/s` (NTFS) / `842.0 KB/s` (FAT16), raw VFS read `4,807.8 KB/s`
+  (NTFS) / `5,185.8 KB/s` (FAT16), HTTP stream `360.3 KB/s`, 100% SHA-256
+  match, 0 bytes of heap leaked (`1.49 MB` free heap throughout).
+- **Cross-platform OpenBeken FTP server driver (`drv_ftp.c` / `drv_ftp.h`)**:
+  Implemented a non-blocking, 4 KB chunked FTP server driver (`startDriver FTP`,
+  port 21 control, port 2121 `PASV`/`EPSV` + `PORT`) using OpenBeken's standard
+  `lfs_*` VFS API. Benchmarked in a single continuous session across LittleFS,
+  `/usb0` (NTFS 10 MB `STOR` at `1,044.2 KB/s`, `RETR` at `383.8 KB/s`),
+  `/usb1` (FAT16 10 MB `STOR` at `696.4 KB/s`, `RETR` at `333.0 KB/s`), and
+  `/usb2` (FAT32) with 100% SHA-256 verification. Full details in
+  `docs/06-openbeken-vfs-ftp.md`.
+- **Cross-platform OpenBeken SMB2 server driver (`drv_smb.c` / `drv_smb.h`)**:
+  Implemented an SMB2 (`MS-SMB2` 2.0.2 / 2.1) server driver (`startDriver SMB`,
+  port 445) exposing `\\<ip>\obk`, `\usb0`, `\usb1`, and `\usb2` over
+  OpenBeken's standard `lfs_*` VFS API, complete with NTLMv2 authentication,
+  SPNEGO `mechListMIC`, `HMAC-SHA256` packet signing,
+  `FSCTL_VALIDATE_NEGOTIATE_INFO` (`0x00140204`), compound request chaining,
+  and 64 KB chunked file streaming. Verified with native Windows 11 `net use`
+  and PowerShell: 10 MB JPEG streamed to `/usb0` (NTFS) at `989.3 KB/s` write /
+  `327.2 KB/s` read and `/usb1` (FAT16) at `602.9 KB/s` write / `293.2 KB/s`
+  read with 100% SHA-256 verification.

@@ -183,6 +183,7 @@ static void on_mqtt_tcp_event(tcp_conn_t *tc, int event)
     } else if (event == TCP_EV_PEER_FIN || event == TCP_EV_CLOSED) {
         if (event == TCP_EV_PEER_FIN && c->tcp)
             tcp_close(c->tcp);
+        tcp_set_user(tc, 0);
         c->tcp = 0;
         int was_active = c->connected || c->connecting;
         c->connected = 0;
@@ -220,13 +221,16 @@ void mqtt_disconnect(mqtt_client_t *client)
 {
     if (!client) return;
     if (client->tcp) {
-        if (client->connected) {
-            const uint8_t disc[2] = { 0xE0, 0x00 };
-            tcp_send(client->tcp, disc, 2);
-        }
-        tcp_set_user(client->tcp, 0);
-        tcp_close(client->tcp);
+        tcp_conn_t *tc = client->tcp;
         client->tcp = 0;
+        if (tcp_user(tc) == client) {
+            if (client->connected) {
+                const uint8_t disc[2] = { 0xE0, 0x00 };
+                tcp_send(tc, disc, 2);
+            }
+            tcp_set_user(tc, 0);
+            tcp_close(tc);
+        }
     }
     client->connected = 0;
     client->connecting = 0;

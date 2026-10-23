@@ -44,3 +44,46 @@ _start:
     b       3b
     nop
     .end _start
+
+    .text
+    .align  2
+    .globl  setjmp
+    .ent    setjmp
+setjmp:
+    sw      $s0, 0($a0)
+    sw      $s1, 4($a0)
+    sw      $s2, 8($a0)
+    sw      $s3, 12($a0)
+    sw      $s4, 16($a0)
+    sw      $s5, 20($a0)
+    sw      $s6, 24($a0)
+    sw      $s7, 28($a0)
+    sw      $fp, 32($a0)
+    sw      $sp, 36($a0)
+    sw      $ra, 40($a0)
+    jr      $ra
+    move    $v0, $zero
+    .end    setjmp
+
+    .globl  longjmp
+    .ent    longjmp
+longjmp:
+    lw      $s0, 0($a0)
+    lw      $s1, 4($a0)
+    lw      $s2, 8($a0)
+    lw      $s3, 12($a0)
+    lw      $s4, 16($a0)
+    lw      $s5, 20($a0)
+    lw      $s6, 24($a0)
+    lw      $s7, 28($a0)
+    lw      $fp, 32($a0)
+    lw      $sp, 36($a0)
+    lw      $ra, 40($a0)
+    nop
+    bne     $a1, $zero, 1f
+    move    $v0, $a1
+    li      $v0, 1
+1:
+    jr      $ra
+    nop
+    .end    longjmp

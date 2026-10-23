@@ -41,6 +41,7 @@ struct bsd_sock {
     uint16_t           remote_port;
     tcp_conn_t        *tcp;
     int                peer_closed;
+    uint8_t            first_recv_done;
     uint8_t           *rx_buf;
     uint32_t           rx_len;
     int                accept_q[MAX_ACCEPT_QUEUE];
@@ -121,7 +122,9 @@ static void on_tcp_data(tcp_conn_t *c, const uint8_t *data, uint32_t len)
         memcpy(s->rx_buf + s->rx_len, data, copy);
         s->rx_len += copy;
     }
-    if (s->rx_len >= 16384u)
+    if (s->rx_len >= SOCK_RX_BUF_SIZE - 1500u)
+        tcp_set_rcv_wnd(c, 0xFFFFu);
+    else if (s->rx_len >= 16384u)
         tcp_set_rcv_wnd(c, 0);
 }
 
@@ -177,6 +180,8 @@ static void on_tcp_event(tcp_conn_t *c, int event)
 static void on_udp_packet(const uint8_t src_ip[4], uint16_t src_port, uint16_t dst_port,
                           const uint8_t *data, uint32_t len)
 {
+    if (len > 1472u)
+        len = 1472u;
     for (int i = 0; i < MAX_BSD_SOCKETS; i++) {
         struct bsd_sock *s = &socks[i];
         if (s->kind == BSD_UDP && s->local_port == dst_port) {
@@ -184,12 +189,16 @@ static void on_udp_packet(const uint8_t src_ip[4], uint16_t src_port, uint16_t d
                 s->rx_buf = (uint8_t *)malloc(SOCK_RX_BUF_SIZE);
                 if (!s->rx_buf) return;
             }
-            if (len > SOCK_RX_BUF_SIZE)
-                len = SOCK_RX_BUF_SIZE;
-            memcpy(s->rx_buf, data, len);
-            s->rx_len = len;
-            memcpy(s->remote_ip, src_ip, 4);
-            s->remote_port = src_port;
+            if (s->rx_len + 8u + len > SOCK_RX_BUF_SIZE)
+                continue;
+            uint8_t *p = s->rx_buf + s->rx_len;
+            memcpy(p, src_ip, 4);
+            p[4] = (uint8_t)(src_port >> 8);
+            p[5] = (uint8_t)(src_port & 0xFF);
+            p[6] = (uint8_t)(len >> 8);
+            p[7] = (uint8_t)(len & 0xFF);
+            memcpy(p + 8, data, len);
+            s->rx_len += 8u + len;
         }
     }
 }
@@ -376,6 +385,7 @@ int lwip_send(int fd, const void *data, size_t size, int flags)
     size_t sent = 0;
     uint32_t start = xTaskGetTickCount();
     while (sent < size) {
+        net_poll();
         if (!s->tcp || !tcp_is_established(s->tcp)) {
             errno = ECONNRESET;
             return sent > 0 ? (int)sent : -1;
@@ -440,16 +450,23 @@ int lwip_recvfrom(int fd, void *mem, size_t len, int flags,
     int nonblock = s->nonblocking || (flags & MSG_DONTWAIT);
     uint32_t start = xTaskGetTickCount();
 
+    if (s->rx_len < 16384u)
+        net_poll();
     while (s->rx_len == 0) {
+        if (nonblock) {
+            net_poll();
+            if (s->rx_len > 0)
+                break;
+            if (s->peer_closed || (s->type == SOCK_STREAM && !s->tcp))
+                return 0;
+            errno = EWOULDBLOCK;
+            return -1;
+        }
         rtos_yield();
         if (s->rx_len > 0)
             break;
         if (s->peer_closed || (s->type == SOCK_STREAM && !s->tcp))
             return 0;
-        if (nonblock) {
-            errno = EWOULDBLOCK;
-            return -1;
-        }
         if ((uint32_t)(xTaskGetTickCount() - start) >= s->rcv_timeout_ms) {
             errno = EWOULDBLOCK;
             return -1;
@@ -457,28 +474,53 @@ int lwip_recvfrom(int fd, void *mem, size_t len, int flags,
     }
 
     uint32_t max_chunk = (uint32_t)len;
-    if (s->type == SOCK_STREAM && max_chunk > 1460u)
-        max_chunk = 1460u;
-
-    /* Briefly poll to coalesce back-to-back TCP segments up to one MSS (1460) */
-    if (s->type == SOCK_STREAM && s->rx_len < max_chunk && !s->peer_closed) {
-        uint32_t cstart = xTaskGetTickCount();
-        while ((uint32_t)(xTaskGetTickCount() - cstart) < 2 && s->rx_len < max_chunk && !s->peer_closed)
-            rtos_yield();
+    if (s->type == SOCK_STREAM && s->local_port == 80 && !s->first_recv_done) {
+        if (max_chunk > 1460u)
+            max_chunk = 1460u;
+        /* Coalesce initial HTTP header segments up to one MSS on the first recv() */
+        if (s->rx_len < max_chunk && !s->peer_closed) {
+            uint32_t cstart = xTaskGetTickCount();
+            while ((uint32_t)(xTaskGetTickCount() - cstart) < 2 && s->rx_len < max_chunk && !s->peer_closed)
+                rtos_yield();
+        }
+        if (!(flags & MSG_PEEK))
+            s->first_recv_done = 1;
     }
 
-    uint32_t copy = (s->rx_len < max_chunk) ? s->rx_len : max_chunk;
-    memcpy(mem, s->rx_buf, copy);
-    if (!(flags & MSG_PEEK)) {
-        if (s->type == SOCK_DGRAM) {
+    uint32_t copy;
+    if (s->type == SOCK_DGRAM) {
+        if (s->rx_len < 8u) {
             s->rx_len = 0;
-        } else {
+            errno = EWOULDBLOCK;
+            return -1;
+        }
+        memcpy(s->remote_ip, s->rx_buf, 4);
+        s->remote_port = (uint16_t)(((uint16_t)s->rx_buf[4] << 8) | s->rx_buf[5]);
+        uint32_t pkt_len = ((uint32_t)s->rx_buf[6] << 8) | s->rx_buf[7];
+        if (8u + pkt_len > s->rx_len)
+            pkt_len = s->rx_len - 8u;
+        copy = (pkt_len < max_chunk) ? pkt_len : max_chunk;
+        memcpy(mem, s->rx_buf + 8, copy);
+        if (!(flags & MSG_PEEK)) {
+            uint32_t consume = 8u + pkt_len;
+            uint32_t rem = (s->rx_len > consume) ? (s->rx_len - consume) : 0;
+            if (rem > 0)
+                memmove(s->rx_buf, s->rx_buf + consume, rem);
+            s->rx_len = rem;
+        }
+    } else {
+        copy = (s->rx_len < max_chunk) ? s->rx_len : max_chunk;
+        memcpy(mem, s->rx_buf, copy);
+        if (!(flags & MSG_PEEK)) {
             uint32_t rem = s->rx_len - copy;
             if (rem > 0)
                 memmove(s->rx_buf, s->rx_buf + copy, rem);
             s->rx_len = rem;
-            if (s->tcp && s->rx_len < 8192u)
-                tcp_set_rcv_wnd(s->tcp, 4096);
+            if (s->tcp && rem < SOCK_RX_BUF_SIZE - 1500u)
+                tcp_set_rcv_wnd(s->tcp, 0);
+            net_poll();
+            if (s->tcp && s->rx_len < 16384u)
+                tcp_set_rcv_wnd(s->tcp, 16384);
         }
     }
 
@@ -513,9 +555,19 @@ int lwip_close(int fd)
     struct bsd_sock *s = get_sock(fd);
     if (!s) return -1;
     if (s->kind == BSD_TCP_CONN && s->tcp) {
-        tcp_set_user(s->tcp, 0);
-        tcp_close(s->tcp);
-        s->tcp = 0;
+        uint32_t t0 = timer_ms();
+        while (s->tcp && tcp_is_established(s->tcp) &&
+               tcp_send_space(s->tcp) < TCP_SNDBUF &&
+               (uint32_t)(timer_ms() - t0) < 1000u) {
+            net_poll();
+            tcp_poll();
+        }
+        if (s->tcp) {
+            tcp_set_user(s->tcp, 0);
+            tcp_close(s->tcp);
+            net_poll();
+            s->tcp = 0;
+        }
     } else if (s->kind == BSD_TCP_LISTEN) {
         for (int i = 0; i < s->accept_cnt; i++)
             lwip_close(s->accept_q[i]);
@@ -553,6 +605,9 @@ int lwip_setsockopt(int fd, int level, int optname, const void *optval, socklen_
         if (s->local_port == 80 && ms > 2000u)
             ms = 2000u;
         s->rcv_timeout_ms = ms ? ms : 2000u;
+    } else if (level == IPPROTO_IP && optname == IP_ADD_MEMBERSHIP && optval && optlen >= sizeof(struct ip_mreq)) {
+        const struct ip_mreq *mreq = (const struct ip_mreq *)optval;
+        net_igmp_join((const uint8_t *)&mreq->imr_multiaddr.s_addr);
     }
     return 0;
 }
@@ -685,14 +740,26 @@ int inet_aton(const char *cp, struct in_addr *addr)
     return 1;
 }
 
+static int resolve_hostname_ipv4(const char *hostname, uint8_t out_ip[4]);
+
 uint32_t inet_addr(const char *cp)
 {
-    struct in_addr a;
-    if (!inet_aton(cp, &a))
+    if (!cp || !*cp)
         return INADDR_NONE;
-    const char *colon = cp ? strchr(cp, ':') : 0;
+    const char *colon = strchr(cp, ':');
     custom_ntp_port = colon ? (uint16_t)atoi(colon + 1) : 0;
-    return a.s_addr;
+    struct in_addr a;
+    if (inet_aton(cp, &a))
+        return a.s_addr;
+    char host[64];
+    size_t hlen = colon ? (size_t)(colon - cp) : strlen(cp);
+    if (hlen == 0 || hlen >= sizeof(host))
+        return INADDR_NONE;
+    memcpy(host, cp, hlen);
+    host[hlen] = 0;
+    if (resolve_hostname_ipv4(host, (uint8_t *)&a.s_addr) == 0)
+        return a.s_addr;
+    return INADDR_NONE;
 }
 
 char *inet_ntoa_r(struct in_addr addr, char *buf, int buflen)

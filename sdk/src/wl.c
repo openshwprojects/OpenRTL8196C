@@ -254,6 +254,10 @@ static void efuse_load(struct wl_dev *d)
         d->pwr_cck[i] = (d->fuse_ok && c != 0xFF) ? c : 0x22;
         d->pwr_ht40_1s[i] = (d->fuse_ok && h != 0xFF) ? h : 0x22;
     }
+    uint8_t th = efuse_map[0x7A] & 0x1F;                          /* EEPROM_THERMAL_METER */
+    if (!d->fuse_ok || th < 7 || th > 29)
+        th = 14;                                                  /* RTL8192CE reference baseline */
+    d->ther_ref = th;
 }
 
 /* ---- bring-up (as examples/25_wifi_scan) ---- */
@@ -442,6 +446,7 @@ int wl_hw_init(struct wl_dev *d, const struct wl_tables *t)
     wr8(d, MSR, rd8(d, MSR) & ~0x03);
     wr8(d, REG_TXPAUSE, 0xFF);                               /* receive only until wl_hw_tx_enable */
     d->chan = 1;
+    rf_write(d, 0, 0x24, 0x60);                              /* enable + trigger RF thermal meter */
     return 0;
 }
 
@@ -449,6 +454,50 @@ void wl_hw_set_channel(struct wl_dev *d, uint8_t ch)
 {
     d->chan = ch;
     for (int p = 0; p < 2; p++) rf_write(d, p, 0x18, (d->chnlval[p] & ~0x3FFu) | ch);
+}
+
+static uint32_t rf_read_fast(struct wl_dev *d, int path, uint32_t reg)
+{
+    uint32_t a = rd32(d, RFPGA0_XA_HSSI2);
+    uint32_t b = path ? rd32(d, rf_hssi2[path]) : a;
+    b = (b & ~0x7F800000u) | ((reg & 0x3F) << 23) | 0x80000000u;
+    wr32(d, RFPGA0_XA_HSSI2, a & ~0x80000000u); delay_us(20);
+    wr32(d, rf_hssi2[path], b); delay_us(20);
+    wr32(d, RFPGA0_XA_HSSI2, a | 0x80000000u); delay_us(20);
+    int pi = (rd32(d, rf_hssi1[path]) >> 8) & 1;
+    return rd32(d, pi ? rf_rbpi[path] : rf_rb[path]) & 0xFFFFF;
+}
+
+float wl_hw_read_temperature(struct wl_dev *d, uint8_t *out_raw)
+{
+    /* RF Path A reg 0x24 (RF_T_METER): bit 6 = enable, bit 5 = trigger (clears
+     * when conversion completes), bits [4:0] = 5-bit thermal index (0..31). */
+    uint32_t v = rf_read_fast(d, 0, 0x24);
+    if ((v & 0x20u) || (v & 0x1Fu) == 0) {
+        rf_write(d, 0, 0x24, 0x60);
+        delay_us(200);
+        v = rf_read_fast(d, 0, 0x24);
+    }
+    /* Re-arm conversion for the next periodic poll */
+    rf_write(d, 0, 0x24, 0x60);
+
+    uint8_t raw = (uint8_t)(v & 0x1Fu);
+    if (out_raw)
+        *out_raw = raw;
+    if (raw >= 4 && raw <= 31) {
+        d->ther_hist[d->ther_idx] = raw;
+        d->ther_idx = (uint8_t)((d->ther_idx + 1u) & 7u);
+        if (d->ther_cnt < 8)
+            d->ther_cnt++;
+    }
+    if (d->ther_cnt == 0)
+        return 42.0f;
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < d->ther_cnt; i++)
+        sum += d->ther_hist[i];
+    float avg = (float)sum / (float)d->ther_cnt;
+    uint8_t ref = (d->ther_ref >= 7 && d->ther_ref <= 29) ? d->ther_ref : 14;
+    return 42.0f + (avg - (float)ref) * 1.8f;
 }
 
 static int rssi_of(const uint8_t *phy, uint32_t mcs, int hp)

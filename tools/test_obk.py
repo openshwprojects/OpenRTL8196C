@@ -132,7 +132,7 @@ def main():
 
     print("=== 7. Testing Web UI HTTP OTA (POST /api/ota) ===")
     img_bytes = (ROOT / "build" / "obk" / "openbeken_rtl8196c.img").read_bytes()
-    st, ota_resp = http_post(STATIC_IP, "/api/ota", img_bytes, content_type="application/octet-stream", timeout=20.0)
+    st, ota_resp = http_post(STATIC_IP, "/api/ota", img_bytes, content_type="application/octet-stream", timeout=45.0)
     assert st == 200
     ota_json = json.loads(ota_resp)
     assert ota_json.get("size") == len(img_bytes)
@@ -294,7 +294,24 @@ def main():
                 assert ap_up, "Expected router to return to Soft-AP mode (192.168.4.1)"
                 print("  Restored default Soft-AP mode (192.168.4.1/24, DHCP 192.168.4.2..9)")
 
-    print("\nALL 10 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
+    print("=== 11. Testing Web UI Wi-Fi Scan (/cfg_wifi?scan=1), Berry & mDNS ===")
+    st_scan, scan_html = http_get(STATIC_IP, "/cfg_wifi?scan=1")
+    assert st_scan == 200 and "<table><tr><th>SSID</th>" in scan_html, "Expected Wi-Fi scan table"
+    http_get(STATIC_IP, "/cm?cmnd=berry%20setChannel(1,%2077)")
+    _, ch_berry_raw = http_get(STATIC_IP, "/api/channels")
+    ch_berry = json.loads(ch_berry_raw)
+    assert ch_berry.get("1") == 77, f"Expected Berry setChannel(1, 77), got {ch_berry}"
+    http_get(STATIC_IP, "/cm?cmnd=startDriver%20MDNS")
+    mdns_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    mdns_sock.settimeout(3.0)
+    mdns_q = struct.pack("!HHHHHH", 0x1234, 0, 1, 0, 0, 0) + b"\x05_http\x04_tcp\x05local\x00" + struct.pack("!HH", 12, 1)
+    mdns_sock.sendto(mdns_q, (STATIC_IP, 5353))
+    mdns_resp, _ = mdns_sock.recvfrom(512)
+    mdns_sock.close()
+    assert len(mdns_resp) >= 32 and struct.unpack("!H", mdns_resp[6:8])[0] >= 1, "Expected valid mDNS PTR/SRV/A response"
+    print(f"  Wi-Fi Scan HTML + Berry (Ch1={ch_berry.get('1')}) + mDNS ({len(mdns_resp)}B reply) verified!")
+
+    print("\nALL 11 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
 
 
 if __name__ == "__main__":

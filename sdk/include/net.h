@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#define NET_MAX_UDP_LISTENERS 8
+#define NET_MAX_UDP_LISTENERS 16
 #define NET_ARP_CACHE 16
 
 typedef void (*udp_handler_t)(const uint8_t src_ip[4], uint16_t src_port, uint16_t dst_port,
@@ -47,6 +47,11 @@ int  net_udp_listen(uint16_t port, udp_handler_t h);  /* 0 ok, -1 full */
 int  net_udp_send(const uint8_t dst_ip[4], uint16_t src_port, uint16_t dst_port,
                   const void *data, uint32_t len);     /* 0 ok, -1 no route/ring full */
 void net_arp_request(const uint8_t ip[4]);             /* broadcast "who has" */
+void net_igmp_join(const uint8_t group_ip[4]);         /* join IPv4 multicast group & send IGMPv2 report */
+void net_igmp_report_all(void);                        /* send IGMPv2 reports for all joined groups */
+typedef void (*icmp_reply_handler_t)(const uint8_t src_ip[4], uint16_t id, uint16_t seq, uint32_t len);
+void net_icmp_set_reply_handler(icmp_reply_handler_t h);
+int  net_icmp_send_echo(const uint8_t dst_ip[4], uint16_t id, uint16_t seq, uint32_t payload_len);
 
 const uint8_t *net_ip(void);
 const uint8_t *net_active_ip(void);

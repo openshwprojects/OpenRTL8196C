@@ -98,6 +98,8 @@ static void reap_zombies(void)
     }
 }
 
+static int in_timer_cb = 0;
+
 static void pump_background(void)
 {
     if (in_bg_poll)
@@ -106,6 +108,12 @@ static void pump_background(void)
 
     if (bg_poll_fn)
         bg_poll_fn();
+
+    in_bg_poll = 0;
+
+    if (in_timer_cb)
+        return;
+    in_timer_cb = 1;
 
     uint32_t now = timer_ms();
     for (int i = 0; i < MAX_TIMERS; i++) {
@@ -116,16 +124,21 @@ static void pump_background(void)
         }
     }
 
-    in_bg_poll = 0;
+    in_timer_cb = 0;
 }
 
 void rtos_yield(void)
 {
     if (!rtos_started)
         rtos_init();
+    if (in_bg_poll)
+        return;
 
     pump_background();
     reap_zombies();
+
+    if (in_timer_cb)
+        return;
 
     uint32_t now = timer_ms();
     for (int step = 1; step <= MAX_TASKS; step++) {
