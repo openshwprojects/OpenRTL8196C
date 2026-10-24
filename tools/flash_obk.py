@@ -293,7 +293,7 @@ def main():
         verify_cold_boot(args.ip, args.com, args.baud, power_cycle=True)
     else:
         print("\n=== Step 4: Booting Fresh OpenBeken Image in RAM ===")
-        ota.send_ota(args.ip, args.port, ota.CMD_RAM, obk_img, target_addr=0xA0500000, timeout=20.0)
+        ota.send_ota(args.ip, args.port, ota.CMD_RAM, obk_img, target_addr=0x80500000, timeout=20.0)
         time.sleep(8.0)
         wait_for_ota(args.ip, args.port, timeout=15.0)
 

@@ -23,7 +23,11 @@ static void reset_recovery(struct usb_msc *m)
 {
     msc_stats.reset_recoveries++;
     usb_control_dev(m->dev, 0x21, 0xFF, 0, m->iface, 0, 0);
-    usb_clear_halt_dev(m->dev, m->ep_in);
+    if (usb_clear_halt_dev(m->dev, m->ep_in) < 0) {
+        if (usb_recover_dev(m->dev) == 0)
+            delay_ms(50);
+        return;
+    }
     usb_clear_halt_dev(m->dev, m->ep_out);
 }
 
@@ -170,8 +174,11 @@ static int rw10(struct usb_msc *m, uint8_t op, uint32_t lba, uint32_t count, voi
         cdb[7] = (uint8_t)(n >> 8);
         cdb[8] = (uint8_t)n;
         int rc = -1;
-        for (int attempt = 0; attempt < 3; attempt++) {
-            if (attempt) msc_stats.retries++;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            if (attempt) {
+                msc_stats.retries++;
+                delay_ms(20);
+            }
             rc = bot(m, cdb, 10, in, p, n * m->block_size);
             if (rc == (int)(n * m->block_size)) break;
             if (rc <= -100) request_sense(m);

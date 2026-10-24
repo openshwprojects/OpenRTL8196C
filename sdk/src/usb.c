@@ -870,7 +870,7 @@ int usb_hub_scan_all(void)
             delay_ms(40); /* TRSTRCY: recovery time before addressing 0 */
 
             struct usb_dev *child = existing ? existing : &devs[dev_count];
-            int assign = (existing && existing->addr > 1) ? existing->addr : next_usb_addr++;
+            int assign = (existing && existing->addr > 1) ? existing->addr : (next_usb_addr < USB_MAX_DEVS ? next_usb_addr++ : USB_MAX_DEVS);
             memset(child, 0, sizeof *child);
             if (status & (1u << 9))
                 child->speed = USB_SPEED_LOW;
@@ -892,6 +892,40 @@ int usb_hub_scan_all(void)
         }
     }
     return added;
+}
+
+int usb_recover_dev(const struct usb_dev *d)
+{
+    if (!d || d->hub_addr == 0 || d->hub_port == 0)
+        return -1;
+    const struct usb_dev *hub = usb_dev_by_addr(d->hub_addr);
+    if (!hub || !hub->present)
+        return -1;
+    uint16_t port = d->hub_port;
+    int assign = d->addr;
+    uint8_t pst[4];
+    usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_CONNECT, port, 0, 0);
+    usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_ENABLE, port, 0, 0);
+    usb_control_dev(hub, 0x23, 0x03, HUB_FEAT_PORT_RESET, port, 0, 0);
+    int reset_ok = 0;
+    uint16_t status = 0;
+    for (int t = 0; t < 60; t++) {
+        delay_ms(10);
+        if (usb_control_dev(hub, 0xA3, 0x00, 0, port, 4, pst) < 4)
+            break;
+        status = (uint16_t)(pst[0] | (pst[1] << 8));
+        uint16_t change = (uint16_t)(pst[2] | (pst[3] << 8));
+        if (!(status & 0x0010u) && ((status & 0x0002u) || (change & 0x0010u))) {
+            reset_ok = 1;
+            break;
+        }
+    }
+    usb_control_dev(hub, 0x23, 0x01, HUB_FEAT_C_PORT_RESET, port, 0, 0);
+    if (!reset_ok || !(status & 0x0002u))
+        return -2;
+    delay_ms(40);
+    struct usb_dev *mut_d = (struct usb_dev *)d;
+    return enumerate_dev(mut_d, assign);
 }
 
 static void release_companion(void)

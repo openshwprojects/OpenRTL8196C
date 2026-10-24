@@ -209,7 +209,8 @@ static void cam_write(uint32_t entry, const uint8_t *mac, const uint8_t *key, ui
         else content = 0;
         wl_wr32(dev, REG_CAMWRITE, content);
         wl_wr32(dev, REG_CAMCMD, (1u << 31) | (1u << 16) | (entry * 8 + (uint32_t)i));
-        for (int n = 0; n < 100 && (wl_rd32(dev, REG_CAMCMD) & (1u << 31)); n++) ;
+        for (int n = 0; n < 1000 && (wl_rd32(dev, REG_CAMCMD) & (1u << 31)); n++)
+            delay_us(2);
     }
 }
 
@@ -217,7 +218,7 @@ static void install_keys(const uint8_t *gtk, uint32_t gtk_len, uint32_t gtk_id)
 {
     static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
     wl_wr32(dev, REG_CAMCMD, (1u << 31) | (1u << 30));      /* clear all entries */
-    delay_ms(1);
+    delay_ms(2);
     cam_write(CAM_PAIRWISE_ENTRY, info.bssid, ptk + 32, 0, CAM_AES);          /* TK, key id 0 */
     if (gtk_len >= 16) cam_write(gtk_id, bcast, gtk, gtk_id, CAM_AES);
     wl_wr8(dev, 0x101, wl_rd8(dev, 0x101) | 0x02);          /* CR: security engine */
@@ -277,6 +278,9 @@ static void on_eapol(const uint8_t *e, uint32_t len)
         uint32_t n = build_eapol_key(m4, 2 | KI_PAIRWISE | KI_MIC | KI_SECURE, 0, 0, 0);
         eapol_mic(m4, n);
         send_eapol(m4, n);
+        /* Wait for unencrypted EAPOL M4 to leave the TX FIFO over the air (1 Mbps)
+         * before enabling hardware TXENC/RXDEC in REG_SECCFG. */
+        delay_ms(5);
         info.gtk_len = (uint8_t)gtk_len; info.gtk_id = (uint8_t)gtk_id;
         install_keys(gtk, gtk_len, gtk_id);
         set_state(WL_STA_CONNECTED);

@@ -68,7 +68,7 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 14_flash_backup | streams the 8 MB SPI flash over TCP port 9697 (`tools/flashdump.py`) |
 | 15_ota | DHCPv4 client + HTTP + TCP/UDP console + TCP OTA server on port 9698 (`tools/ota.py`) |
 | 16_stage2 | stage-2 A/B partition chooser (`cs6c` image for `0x010000`) |
-| OpenBeken (`build_obk.py`) | Full OpenBeken (`PLATFORM_RTL8196C`) firmware: Dual-homed Ethernet + Wi-Fi (STA & Soft-AP), Web UI, REST API, 7 router LEDs, 32 GPIOs, unified LittleFS + USB (`/usb0..3` FAT/exFAT/NTFS R/W) VFS, streaming HTTP `/api/lfs/`, FTP (`drv_ftp.c`), & SMB2 (`drv_smb.c`, `\\<ip>\obk`) servers, HTTP & TCP OTA, NTP, SSDP, Berry, MQTT 3.1.1 + Home Assistant Discovery |
+| OpenBeken (`build_obk.py`) | Full OpenBeken (`PLATFORM_RTL8196C`) firmware running in cached `KSEG0` (`0x80500000` I-cache + D-cache): Dual-homed Ethernet + Wi-Fi (STA & Soft-AP), Web UI, REST API, 7 router LEDs, 32 GPIOs, unified LittleFS + USB (`/usb0..3` FAT/exFAT/NTFS R/W) VFS, streaming HTTP `/api/lfs/`, FTP (`drv_ftp.c`), & SMB2 (`drv_smb.c`, `\\<ip>\obk`) servers, HTTP & TCP OTA (`3.0 MB/s`), NTP, SSDP, Berry, MQTT 3.1.1 + Home Assistant Discovery |
 | 10_usb_probe | raw USB register diagnostics (superseded by 17) |
 | 17_usb_host | SDK USB host driver: power, PHY, EHCI + OHCI, hotplug, enumeration, descriptors |
 | 18_usb_mouse | reads a USB mouse over an interrupt endpoint: movement, buttons and scroll wheel (HID report descriptor parsed by `sdk/src/hid.c`) |
@@ -83,6 +83,7 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 27_wifi_sta | **Working**: Wi-Fi station. Joins a WPA2-PSK (or open) network, 4-way handshake, hardware AES-CCMP, DHCP client, DNS through the router, SDK web page on the Wi-Fi address (`wl_sta.c`, `wpa_crypto.c`). Credentials in git-ignored `wifi_config.h` |
 | 28_wifi_ap | Wi-Fi: soft-AP demo, beacons an open test network and answers probe/auth/association |
 | 29_wifi_ap_http | **Working**: open Wi-Fi AP with DHCP, captive DNS and the SDK web server at http://192.168.4.1/ (`wl_ap.c`, `dhcpd.c`, `dnsd.c`); a PC joins and gets the page over the air |
+| 30_ram_exec | **Working**: SPI NOR Flash XIP (`0xBD`/`0x9D`) vs Uncached SDRAM (`KSEG1` `0xA0500000`) vs Cached SDRAM (`KSEG0` `0x80500000` I-cache + D-cache) execution profiler (`69.9x` over SPI XIP, `43.0x` on WPA2 PBKDF2-SHA1) |
 
 Wi-Fi state, code map, hardware gotchas and the plan for OpenBeken over Wi-Fi: `docs/05-wifi-handover.md`.
 
@@ -124,7 +125,7 @@ sdk/src/wl_sta.c             station: scan, auth/assoc, WPA2 4-way handshake, CC
 sdk/src/wpa_crypto.c         SHA-1, HMAC, PBKDF2, 802.11i PRF, AES-128, RFC 3394 unwrap (host-tested, tools/host_tests)
 sdk/src/dhcpd.c dnsd.c       tiny DHCP server and captive DNS for the AP
 sdk/src/diskio_usb.c         FatFs disk glue for USB mass storage (sdk/third_party/fatfs: read/write FAT + exFAT)
-sdk/rtl8196c.ld              link script (load at 0xA0500000, uncached)
+sdk/rtl8196c.ld              link script (default 0xA0500000 uncached; 0x80500000 cached KSEG0 for OpenBeken)
 ```
 
 Tools read `bench.ini` (COM port, socket IP, board IP); `BENCH_PORT`,
@@ -155,7 +156,7 @@ python tools/ota.py --ram build/obk/openbeken_rtl8196c.img
 python tools/flash_obk.py                    # full standardized SPI flash install + cold-boot verification
 python tools/flash_obk.py --update-only      # OTA-flash OpenBeken into inactive A/B slot
 python tools/flash_obk.py --verify-only      # power-cycle & verify standalone cold boot from SPI flash
-python tools/test_obk.py                     # 9-step hardware test suite
+python tools/test_obk.py                     # 12-step hardware test suite
 ```
 
 Run the hardware regression suite with:

@@ -3,7 +3,7 @@
 
 Produces:
   build/obk/openbeken_rtl8196c.elf  (linked ELF)
-  build/obk/openbeken_rtl8196c.bin  (raw binary at 0xA0500000)
+  build/obk/openbeken_rtl8196c.bin  (raw binary at 0x80500000)
   build/obk/openbeken_rtl8196c.img  (RAPP-wrapped OTA image)
   build/obk/openbeken_rtl8196c.lst  (disassembly)
   build/obk/openbeken_rtl8196c.map  (linker map)
@@ -96,8 +96,8 @@ def ensure_berry_generated(obk_root: Path):
 def main():
     ap = argparse.ArgumentParser(description="Build OpenBeken for OpenRTL8196C")
     ap.add_argument("--obk", default=str(DEFAULT_OBK), help="Path to OpenBK7231T_App repo")
-    ap.add_argument("--load", default="0xA0500000", help="RAM load/entry address")
-    ap.add_argument("--stack", default="0xA06F0000", help="Initial main stack top (below heap at 0xA0700000)")
+    ap.add_argument("--load", default="0x80500000", help="RAM load/entry address (cached KSEG0)")
+    ap.add_argument("--stack", default="0x806F0000", help="Initial main stack top (below heap at 0x80700000)")
     ap.add_argument("--ver", default="1.18.RTL8196C", help="USER_SW_VER string")
     ap.add_argument("--seq", type=int, default=1, help="RAPP sequence number")
     ap.add_argument("--clean", action="store_true", help="Force full rebuild of all objects")

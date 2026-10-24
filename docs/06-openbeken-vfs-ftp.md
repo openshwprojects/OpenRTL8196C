@@ -1,10 +1,12 @@
-# OpenBeken Wi-Fi, Unified USB/LittleFS VFS, Streaming HTTP & FTP Server
+# OpenBeken Wi-Fi, Unified USB/LittleFS VFS, Streaming HTTP, FTP & SMB2 Server
 
-State as of 2026-10-17 (`seq=35`). Documents the dual-homed OpenBeken Wi-Fi
-integration, the unified LittleFS + USB (FAT16/FAT32/exFAT/NTFS) Virtual
-Filesystem (`hal_vfs_rtl8196c.c`), zero-RAM-buffering HTTP/VFS streaming, the
-cross-platform OpenBeken FTP server driver (`drv_ftp.c`), and the benchmark
-results on the Edimax / Cyfrowy Polsat LT-6408n (Realtek RTL8196C + RTL8192CE).
+State as of 2026-10-23 (`seq=45`, cached `KSEG0` `0x80500000` execution). Documents
+the dual-homed OpenBeken Wi-Fi integration, the unified LittleFS + USB
+(FAT16/FAT32/exFAT/NTFS) Virtual Filesystem (`hal_vfs_rtl8196c.c`),
+zero-RAM-buffering HTTP/VFS streaming, the cross-platform OpenBeken FTP
+(`drv_ftp.c`) and SMB2 (`drv_smb.c`) server drivers, cached `KSEG0` SDRAM
+execution, and benchmark results on the Edimax / Cyfrowy Polsat LT-6408n
+(Realtek RTL8196C + RTL8192CE).
 
 ---
 
@@ -28,6 +30,34 @@ OpenBeken (`PLATFORM_RTL8196C`) runs dual-homed on Ethernet (`swcore.c`) and
   RSSI, and encryption type.
 - **Home Assistant & MQTT 3.1.1**: Verified end-to-end with Mosquitto and Home
   Assistant auto-discovery (7 router LED channels + status telemetry).
+
+### 1.1 Web UI, Wi-Fi Scanner, MQTT & Home Assistant Screenshots
+
+- **Main Dashboard, Configuration, GPIO & OTA Pages**:
+  ![OpenBeken Home](../screenshots/01_home.png)
+  ![Configuration Menu](../screenshots/02_config_menu.png)
+  ![GPIO Pins Configuration](../screenshots/03_gpio_pins.png)
+  ![Startup Configuration](../screenshots/06_startup_config.png)
+  ![General Flags](../screenshots/09_general_flags.png)
+  ![OTA Update](../screenshots/08_ota_update.png)
+  ![About Page](../screenshots/07_about.png)
+
+- **Wi-Fi Site Survey, Network, IP & MAC Configuration**:
+  ![Wi-Fi Site Survey Scan](../screenshots/11_wifi_scan.png)
+  ![Network Configuration](../screenshots/05_network_config.png)
+  ![IP Configuration](../screenshots/12_ip_config.png)
+  ![MAC Configuration](../screenshots/13_mac_config.png)
+
+- **MQTT 3.1.1, Home Assistant Auto-Discovery & Dual-Net WebApp**:
+  ![MQTT Configuration](../screenshots/04_mqtt_config.png)
+  ![MQTT Connected Configuration](../screenshots/15_mqtt_connected_cfg.png)
+  ![Home Page with MQTT Connected](../screenshots/16_home_mqtt_connected.png)
+  ![Home Assistant Discovery Page](../screenshots/10_ha_discovery.png)
+  ![Home Assistant MQTT Devices](../screenshots/18_ha_mqtt_devices.png)
+  ![Home Assistant Device Page](../screenshots/17_ha_device_page.png)
+  ![Home Assistant Device Toggled](../screenshots/19_ha_device_toggled.png)
+  ![OpenBeken WebApp](../screenshots/14_webapp.png)
+  ![WebApp Dual-Homed Network Logs](../screenshots/20_webapp_logs_dual_net.png)
 
 ---
 
@@ -65,6 +95,15 @@ and `POST /api/lfs/` requests, limiting file sizes to available heap (< 1.5 MB).
   heap allocation), enabling multi-megabyte and gigabyte file transfers while
   Free Heap stays constant at ~1.42–1.49 MB.
 
+### 2.1 OpenBeken WebApp Unified VFS Screenshots (`/`, `/usb0` NTFS, `/usb1` FAT16)
+
+- **WebApp Filesystem Tab — Root `/` (`autoexec.bat` + `/usb0`, `/usb1`, `/usb2`)**:
+  ![WebApp VFS Root and USB Mounts](../screenshots/21_webapp_lfs_root_usb.png)
+
+- **WebApp Filesystem Tab — `/usb0` (NTFS Volume) & `/usb1` (FAT16 Volume)**:
+  ![WebApp VFS USB0 NTFS](../screenshots/22_webapp_lfs_usb0_ntfs.png)
+  ![WebApp VFS USB1 FAT16](../screenshots/23_webapp_lfs_usb1_fat16.png)
+
 ---
 
 ## 3. Cross-Platform OpenBeken FTP Server (`drv_ftp.c` / `drv_ftp.h`)
@@ -95,6 +134,21 @@ Implemented in `src/driver/drv_ftp.c` and `src/driver/drv_ftp.h` (`ENABLE_DRIVER
     `ABOR`.
   - File & Directory Management: `DELE`, `MKD`/`XMKD`, `RMD`/`XRMD`,
     `RNFR`/`RNTO` (backed by `lfs_rename` / `obk_vfs_rename`).
+
+### 3.1 FileZilla FTP Client & Side-by-Side WebApp Screenshots
+
+- **Root VFS (`/`) — LittleFS + Mounted USB Drives (`usb0`, `usb1`, `usb2`)**:
+  ![FileZilla Root VFS](../screenshots/25_filezilla_root.png)
+  ![FileZilla vs WebApp Root VFS](../screenshots/30_compare_root_ftp_vs_webapp.png)
+
+- **`/usb0` (NTFS Volume) & `/usb0/boot`**:
+  ![FileZilla USB0 NTFS](../screenshots/26_filezilla_usb0_ntfs.png)
+  ![FileZilla USB0 Boot](../screenshots/28_filezilla_usb0_boot.png)
+  ![FileZilla vs WebApp USB0 NTFS](../screenshots/31_compare_usb0_ftp_vs_webapp.png)
+
+- **`/usb1` (FAT16 Volume)**:
+  ![FileZilla USB1 FAT16](../screenshots/27_filezilla_usb1_fat16.png)
+  ![FileZilla vs WebApp USB1 FAT16](../screenshots/32_compare_usb1_ftp_vs_webapp.png)
 
 ---
 
@@ -181,10 +235,11 @@ in `OpenBK7231T_App/src/driver/drv_smb.c` (`ENABLE_DRIVER_SMB`) over TCP port
 network shares:
 
 - `\\192.168.0.134\obk` — unified VFS root `/` (includes LittleFS files plus
-  `/usb0`, `/usb1`, `/usb2`)
-- `\\192.168.0.134\usb0` — direct share rooted at `/usb0` (NTFS)
-- `\\192.168.0.134\usb1` — direct share rooted at `/usb1` (FAT16)
-- `\\192.168.0.134\usb2` — direct share rooted at `/usb2` (FAT32)
+  `/usb0`, `/usb1`, `/usb2`, `/usb3`)
+- `\\192.168.0.134\usb0` — direct share rooted at `/usb0` (58 GB NTFS `"Windows 10"`, `090c:2000`)
+- `\\192.168.0.134\usb1` — direct share rooted at `/usb1` (942 MB FAT16 `"PHONE CARD"`, `05e3:0751`)
+- `\\192.168.0.134\usb2` — direct share rooted at `/usb2` (961 MB FAT32 `"SLITAZ CORE"`, `ffff:5678`)
+- `\\192.168.0.134\usb3` — direct share rooted at `/usb3` (**500 GB / `476,940 MB` NTFS HDD** `"Windows"`, JMicron `152d:0578 External USB 3.0`)
 
 ### 6.1 Windows 10/11 Native `mrxsmb20.sys` Compatibility Details
 
@@ -220,24 +275,113 @@ implements:
    - Supports chained `CREATE -> QUERY_INFO -> CLOSE` and
      `CREATE -> QUERY_DIRECTORY -> CLOSE` compound frames with
      `FileId = { -1, -1 }` substitution and 8-byte response alignment.
+5. **Unsigned 32-Bit File Size Handling for Large Files (`drv_smb.c`)**:
+   - Uses `uint32_t` file sizes across `smb_stat_vfs()` and `smb2_handle_read()`
+     so multi-gigabyte system files on large NTFS drives (`pagefile.sys`
+     `1.44 GB`, `hiberfil.sys` `4.03 GB`) never wrap negative in signed 32-bit
+     arithmetic.
 
 ### 6.2 Live Hardware Verification & 10 MB JPEG Benchmarks (Windows 11 Native SMB2)
 
-Mounting and browsing all volumes from Windows 11 PowerShell:
+Mounting and browsing all 4 simultaneous USB volumes from Windows 11 PowerShell:
 
 ```powershell
 net use \\192.168.0.134\obk admin /user:admin
-Get-ChildItem \\192.168.0.134\obk
-Get-ChildItem \\192.168.0.134\obk\usb0
-Get-ChildItem \\192.168.0.134\obk\usb1
-Get-ChildItem \\192.168.0.134\obk\usb2
+net use Z: \\192.168.0.134\usb3 admin /user:admin /persistent:no
+net use Y: \\192.168.0.134\usb0 admin /user:admin /persistent:no
+net use X: \\192.168.0.134\usb1 admin /user:admin /persistent:no
+net use W: \\192.168.0.134\usb2 admin /user:admin /persistent:no
+Get-ChildItem Z:\
 ```
 
 | SMB2 Path & Filesystem | Operation | Payload Size | Elapsed Time | Throughput | SHA-256 Match |
 |---|---|---:|---:|---:|---|
-| `\\192.168.0.134\obk` (LittleFS + USB root) | `Get-ChildItem` / `Set-Content` / `Get-Content` / `Remove-Item` | 4 entries | < 15 ms | — | PASS |
-| `\\192.168.0.134\obk\usb0\smb_10mb.jpg` (**NTFS**) | `SMB2_WRITE` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **10.35 s** | **989.3 KB/s** | **PASS** |
-| `\\192.168.0.134\obk\usb0\smb_10mb.jpg` (**NTFS**) | `SMB2_READ` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **31.30 s** | **327.2 KB/s** | **PASS** |
-| `\\192.168.0.134\obk\usb1\smb_10mb.jpg` (**FAT16**) | `SMB2_WRITE` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **16.99 s** | **602.9 KB/s** | **PASS** |
-| `\\192.168.0.134\obk\usb1\smb_10mb.jpg` (**FAT16**) | `SMB2_READ` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **34.93 s** | **293.2 KB/s** | **PASS** |
-| `\\192.168.0.134\obk\usb2` (**FAT32**) | `Get-ChildItem` (4 entries including UTF-8 Polish PDF filenames) | 4 entries | < 20 ms | — | PASS |
+| `\\192.168.0.134\obk` (LittleFS + 4× USB root) | `Get-ChildItem` / `Set-Content` / `Get-Content` / `Remove-Item` | 5 entries (`usb0..3` + `autoexec.bat`) | < 15 ms | — | PASS |
+| `\\192.168.0.134\obk\usb0\smb_10mb.jpg` (**NTFS 58 GB**, mapped `Y:`) | `SMB2_WRITE` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **10.35 s** | **989.3 KB/s** | **PASS** |
+| `\\192.168.0.134\obk\usb0\smb_10mb.jpg` (**NTFS 58 GB**, mapped `Y:`) | `SMB2_READ` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **31.30 s** | **327.2 KB/s** | **PASS** |
+| `\\192.168.0.134\obk\usb1\smb_10mb.jpg` (**FAT16 942 MB**, mapped `X:`) | `SMB2_WRITE` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **16.99 s** | **602.9 KB/s** | **PASS** |
+| `\\192.168.0.134\obk\usb1\smb_10mb.jpg` (**FAT16 942 MB**, mapped `X:`) | `SMB2_READ` (streamed in 64 KB chunks) | **10,485,760 B** (10 MB) | **34.93 s** | **293.2 KB/s** | **PASS** |
+| `\\192.168.0.134\obk\usb2` (**FAT32 961 MB**, mapped `W:`) | `Get-ChildItem` (4 entries including UTF-8 Polish PDF filenames) | 4 entries | < 20 ms | — | PASS |
+| `Z:\` -> `\\192.168.0.134\usb3` (**NTFS 500 GB HDD**, `476,940 MB` / `465 GB`) | `net use Z:` / `dir Z:\` / `SMB2_0_INFO_FILESYSTEM` (`Volume="Windows"`, `Serial=8196-C103`, `18` entries including `hiberfil.sys` `4.13 GB`, `pagefile.sys` `1.48 GB`) | 18 entries | < 25 ms | — | PASS |
+
+#### CrystalDiskMark 8.0.5 x64 Benchmark on Mapped SMB2 Share (`Y:` -> `\\192.168.0.134\usb0`, 58 GiB USB 2.0 NTFS, `FILE_FLAG_NO_BUFFERING`)
+
+Running **CrystalDiskMark 8.0.5 x64** (`diskspd64.exe -W0 -S`, unbuffered direct I/O bypassing the Windows SMB client cache) against the mapped OpenBeken SMB2 drive `Y:` (`\\192.168.0.134\usb0`) with cached `KSEG0` (`0x80500000`) execution and the 64 KB VFS streaming window:
+
+| CrystalDiskMark Test | Block Size & Queue/Threads | Read Throughput (`MB/s`) | Write Throughput (`MB/s`) | Read IOPS (`diskspd64`) | Write IOPS (`diskspd64`) |
+|---|---|---:|---:|---:|---:|
+| **`SEQ1M Q8T1`** | `1 MiB` sequential (`16 × 64 KB` SMB2 PDUs), `Q=8, T=1` | **3.55 MB/s** | **2.10 MB/s** | ~54.2 IOPS (`64K`) | ~32.1 IOPS (`64K`) |
+| **`SEQ1M Q1T1`** | `1 MiB` sequential (`16 × 64 KB` SMB2 PDUs), `Q=1, T=1` | **3.77 MB/s** | **2.72 MB/s** | ~57.7 IOPS (`64K`) | ~41.5 IOPS (`64K`) |
+| **`RND4K Q32T1`** | `4 KiB` random (`-r`), `Q=32, T=1` | **1.13 MB/s** | **1.06 MB/s** | **277.96 IOPS** | **275.25 IOPS** |
+| **`RND4K Q1T1`** | `4 KiB` random (`-r`), `Q=1, T=1` | **0.49 MB/s** | **0.45 MB/s** | **120.12 IOPS** | **110.35 IOPS** |
+
+### 6.3 Windows Explorer SMB2 Share, Mapped Network Drives (`W:`..`Z:`) & Comparison Screenshots
+
+- **CrystalDiskMark 8.0.5 x64 Benchmark on Mapped OpenBeken SMB2 Share (`Y:` -> `\\192.168.0.134\usb0`, 58 GiB NTFS)**:
+  ![CrystalDiskMark 8.0.5 x64 Benchmark on OpenBeken SMB2 Share](../screenshots/47_crystaldiskmark_smb_usb.png)
+
+- **OpenBeken Main Web UI Status (FTP + SMB2 Active)**:
+  ![OpenBeken FTP and SMB2 Status](../screenshots/29_obk_main_ftp_smb_status.png)
+
+- **Windows 11 "This PC" (`Ten komputer`) with All 4 USB Drives Mapped via SMB2 (`W:`, `X:`, `Y:`, `Z:`) & Mapped `Z:\` (`500 GB NTFS HDD`)**:
+  ![Windows Explorer This PC Mapped SMB Drives](../screenshots/44_explorer_this_pc_mapped_smb_drives.png)
+  ![Windows Explorer Mapped Drive Z 500GB NTFS HDD](../screenshots/45_explorer_mapped_z_usb3_500gb_hdd.png)
+  ![Windows Explorer This PC vs Mapped Drive Z 500GB HDD](../screenshots/46_compare_this_pc_and_mapped_z_500gb.png)
+
+- **Windows Explorer SMB2 Root Share (`\\192.168.0.134\obk`, 4 USB Drives `usb0`..`usb3`) & WebApp Comparison**:
+  ![Windows Explorer SMB2 Root](../screenshots/33_explorer_smb_root.png)
+  ![Windows Explorer SMB2 vs WebApp Root](../screenshots/37_compare_root_smb_vs_webapp.png)
+
+- **Windows Explorer SMB2 `/usb3` — 500 GB External USB 3.0 NTFS HDD (`\\192.168.0.134\obk\usb3`, `476,940 MB`) & OpenBeken `usb_status` Logs**:
+  ![Windows Explorer SMB2 USB3 500GB NTFS HDD](../screenshots/41_explorer_smb_usb3_500gb_hdd.png)
+  ![OpenBeken WebApp Logs USB3 500GB HDD and 6-Device USB Topology](../screenshots/42_webapp_logs_usb3_500gb_hdd.png)
+  ![Windows Explorer SMB2 vs OpenBeken Logs USB3 500GB HDD](../screenshots/43_compare_usb3_500gb_smb_vs_logs.png)
+
+- **Windows Explorer SMB2 `/usb0` (`\\192.168.0.134\obk\usb0`, 58 GB NTFS) & `/usb0/boot`**:
+  ![Windows Explorer SMB2 USB0 NTFS](../screenshots/34_explorer_smb_usb0_ntfs.png)
+  ![Windows Explorer SMB2 USB0 Boot](../screenshots/36_explorer_smb_usb0_boot.png)
+  ![Windows Explorer SMB2 vs WebApp USB0 NTFS](../screenshots/38_compare_usb0_smb_vs_webapp.png)
+  ![Windows Explorer SMB2 vs FileZilla FTP USB0 NTFS](../screenshots/40_compare_smb_vs_ftp_usb0_ntfs.png)
+
+- **Windows Explorer SMB2 `/usb1` (`\\192.168.0.134\obk\usb1`, 942 MB FAT16)**:
+  ![Windows Explorer SMB2 USB1 FAT16](../screenshots/35_explorer_smb_usb1_fat16.png)
+  ![Windows Explorer SMB2 vs WebApp USB1 FAT16](../screenshots/39_compare_usb1_smb_vs_webapp.png)
+
+---
+
+## 7. Cached `KSEG0` (`0x80500000`) Execution & 12-Step Hardware Verification (`seq=47`)
+
+Switching OpenBeken (`tools/build_obk.py`, `tools/flash_obk.py`, `sdk/src/start.S`)
+from uncached `KSEG1` (`0xA0500000`) to cached `KSEG0` (`0x80500000`, 16 KB
+I-cache + 8 KB write-through D-cache via Lexra CP0 `$20` `CCTL`) accelerates CPU,
+crypto, and network throughput across the board:
+
+| Workload / Benchmark | Uncached `KSEG1` (`0xA0500000`) | Cached `KSEG0` (`0x80500000`) | Speedup |
+|----------------------|--------------------------------:|------------------------------:|--------:|
+| `30_ram_exec` Tight ALU + Branch Loop | `19,340 us` (`11.2x` vs SPI XIP) | `3,104 us` (`69.9x` vs SPI XIP) | **6.23x** |
+| WPA2-PSK `PBKDF2-SHA1` (256 iter) | `424,522 us` | `17,976 us` | **23.62x** (`43.0x` vs SPI XIP) |
+| HTTP `/api/lfs/usb0/bootmgr` (`397,752 B`) | `~360 KB/s` | **3,686 KB/s (`3.60 MB/s`)** | **10.2x** |
+| FTP `RETR /usb0/bootmgr` (`397,752 B`) | `~384 KB/s` | **2,214.6 KB/s (`2.21 MB/s`)** | **5.77x** |
+| SMB2 `READ \\<ip>\obk\usb0\bootmgr` (`397,752 B`, HMAC-SHA256 signed) | `~327 KB/s` | **1,189.5 KB/s (`1.19 MB/s`)** | **3.64x** |
+| CrystalDiskMark 8.0.5 `SEQ1M Q1T1` (`Y:` -> `\\<ip>\usb0`, `16 MiB` unbuffered) | `~327 KB/s` R / `~600 KB/s` W | **3.77 MB/s Read / 2.72 MB/s Write** | **11.5x R / 4.5x W** |
+
+### Hardware & DMA Coherency Details for `KSEG0`
+- **Startup Cache Invalidation (`sdk/src/start.S`)**: Pulses CP0 `$20` (`CCTL`)
+  `0 -> 3 -> 0` (`CCTL_DINVAL | CCTL_IINVAL`) when booted in `KSEG0` before
+  zeroing `.bss`.
+- **Switch Core, Wi-Fi & USB DMA Buffers (`sdk/src/swcore.c`, `sdk/src/wl.c`, `sdk/src/usb.c`)**:
+  All DMA descriptor rings and packet buffers are accessed through their
+  `KSEG1` (`| 0xA0000000`) aliases, with `CCTL_DWBINVAL` barriers around USB
+  EHCI/OHCI transfers (`usb.c`, `usb_msc.c`, `hal_vfs_rtl8196c.c`).
+- **PCIe Bus-Master Quiesce on RAM Hot-Reload (`sdk/src/ota.c`)**: Clears PCIe
+  root-port command register (`REG32(0xB8B00004) = 0`) and asserts `PERST#`
+  (`REG32(SYS_BASE + 0x10) &= ~(1u << 12)`) before copying a new image over
+  `.text`/`.data`/`.bss`.
+- **Fast SDRAM Snapshot Reboot (`hal_generic_rtl8196c.c`)**: `HAL_RebootModule()`
+  checks `SNAPSHOT_BASE_ADDR` (`0xA0900000`) first for sub-second SDRAM soft
+  reboot before falling back to `ota_boot_active_slot(0)`.
+- **Automated 12-Step Hardware Suite (`tools/test_obk.py`)**: Verifies HTTP UI,
+  7 LED channels, LittleFS R/W, USB VFS (`/usb0` NTFS & `/usb1` FAT16 R/W +
+  `3.60 MB/s` streaming), FTP `:21`, SMB2 `:445` (NTLMv2 + compound `CREATE` +
+  `QUERY_DIRECTORY` + `CLOSE`), SSDP `:1900`, Wi-Fi site survey, Berry VM, TCP
+  OTA `:9698`, and HTTP `/ota` with cold-boot persistence (`12/12 PASS`).

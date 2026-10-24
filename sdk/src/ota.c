@@ -40,8 +40,8 @@ static struct {
 
 void ota_ram_jump(const void *src, uint32_t dst_addr, uint32_t len, uint32_t entry_addr)
 {
-    /* Quiesce switch DMA, USB host DMA, and interrupts before overwriting
-     * .text/.data/.bss, matching the Realtek bootloader's "J" command behavior. */
+    /* Quiesce switch DMA, USB host DMA, PCIe Wi-Fi DMA, and interrupts before
+     * overwriting .text/.data/.bss, matching the Realtek bootloader's "J" behavior. */
     REG32(INTC_GIMR) = 0;
     REG32(CPU_ICR) = 0;
     REG32(CPU_IIMR) = 0;
@@ -50,6 +50,10 @@ void ota_ram_jump(const void *src, uint32_t dst_addr, uint32_t len, uint32_t ent
     if (REG32(SYS_BASE + 0x10) & (1u << 17)) {
         REG32(0xB8021010u) = 0; /* EHCI USBCMD = stop */
         REG32(0xB8020004u) = 0; /* OHCI HcControl = reset */
+    }
+    if (REG32(SYS_BASE + 0x10) & (1u << 11)) {
+        REG32(0xB8B00004u) = 0;                /* disable PCIe root port bus-master DMA */
+        REG32(SYS_BASE + 0x10) &= ~(1u << 12); /* assert PCIe PERST# device reset */
     }
 
     volatile uint32_t *stub = (volatile uint32_t *)OTA_RELOC_ADDR;

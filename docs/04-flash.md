@@ -254,7 +254,7 @@ To put the stock firmware back:
 - **Last resort:** desolder the chip and write the backup with a CH341
   programmer, as the article's author did.
 
-## 9. Agreed partition plan [plan]
+## 9. Implemented partition layout [measured, `sdk/include/flash_layout.h`]
 
 Requirements from the owner: keep the ESC UART recovery, OTA over TCP,
 some space for files (LittleFS), and 2 MB per app slot because the

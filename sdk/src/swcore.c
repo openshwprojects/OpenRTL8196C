@@ -2,25 +2,43 @@
  * swcore.c - polled driver for the RTL8196C CPU-port NIC
  *
  * Mirrors the boot loader's swNic_poll.c: one RX pkthdr ring, one RX mbuf
- * ring, one TX pkthdr ring, 2048-byte clusters.  Everything lives in .bss,
- * which is in the uncached KSEG1 image, so no cache maintenance is needed.
- * Pointers handed to the hardware are KSEG1 addresses, exactly like the
- * vendor code does.
+ * ring, one TX pkthdr ring, 2048-byte clusters.  All DMA rings, descriptors,
+ * and packet clusters are accessed through their uncached KSEG1 alias so the
+ * driver works identically whether linked in KSEG1 (0xA0500000) or cached
+ * KSEG0 (0x80500000).
  */
 #include "rtl8196c.h"
 #include "swcore.h"
+#include "irq.h"
 #include "timer.h"
 #include "libc.h"
 
-static uint32_t rx_ring[ETH_RX_RING]  __attribute__((aligned(16)));
-static uint32_t mb_ring[ETH_RX_RING]  __attribute__((aligned(16)));
-static uint32_t tx_ring[ETH_TX_RING]  __attribute__((aligned(16)));
-static struct pkthdr rx_ph[ETH_RX_RING] __attribute__((aligned(32)));
-static struct pkthdr tx_ph[ETH_TX_RING] __attribute__((aligned(32)));
-static struct mbuf   rx_mb[ETH_RX_RING] __attribute__((aligned(16)));
-static struct mbuf   tx_mb[ETH_TX_RING] __attribute__((aligned(16)));
-static uint8_t rx_buf[ETH_RX_RING][ETH_CLUSTER] __attribute__((aligned(16)));
-static uint8_t tx_buf[ETH_TX_RING][ETH_CLUSTER] __attribute__((aligned(16)));
+#define PHYS(p) ((uint32_t)(uintptr_t)(p) & 0x1FFFFFFFu)
+#define UNC(p)  ((void *)(uintptr_t)(PHYS(p) | 0xA0000000u))
+
+struct swcore_dma {
+    uint32_t rx_ring[ETH_RX_RING]  __attribute__((aligned(32)));
+    uint32_t mb_ring[ETH_RX_RING]  __attribute__((aligned(32)));
+    uint32_t tx_ring[ETH_TX_RING]  __attribute__((aligned(32)));
+    struct pkthdr rx_ph[ETH_RX_RING] __attribute__((aligned(32)));
+    struct pkthdr tx_ph[ETH_TX_RING] __attribute__((aligned(32)));
+    struct mbuf   rx_mb[ETH_RX_RING] __attribute__((aligned(32)));
+    struct mbuf   tx_mb[ETH_TX_RING] __attribute__((aligned(32)));
+    uint8_t rx_buf[ETH_RX_RING][ETH_CLUSTER] __attribute__((aligned(32)));
+    uint8_t tx_buf[ETH_TX_RING][ETH_CLUSTER] __attribute__((aligned(32)));
+} __attribute__((aligned(32)));
+
+static struct swcore_dma sw_dma_mem __attribute__((aligned(32)));
+#define SWD     ((struct swcore_dma *)UNC(&sw_dma_mem))
+#define rx_ring (SWD->rx_ring)
+#define mb_ring (SWD->mb_ring)
+#define tx_ring (SWD->tx_ring)
+#define rx_ph   (SWD->rx_ph)
+#define tx_ph   (SWD->tx_ph)
+#define rx_mb   (SWD->rx_mb)
+#define tx_mb   (SWD->tx_mb)
+#define rx_buf  (SWD->rx_buf)
+#define tx_buf  (SWD->tx_buf)
 
 static unsigned rx_idx, mb_idx, tx_idx, tx_done_idx;
 static uint8_t  our_mac[6];
@@ -182,6 +200,9 @@ void eth_init(const uint8_t mac[6])
      * console), the switch ASIC was never initialized by the root loader. */
     if ((REG32(SW_FFCR) & 3u) != 3u)
         swcore_hw_init(mac);
+
+    /* Ensure no dirty cache lines cover sw_dma_mem before KSEG1 ring setup */
+    cctl_write(CCTL_DWBINVAL);
 
     /* Clear ring base registers to 0 first so writing the same ring address
      * on a soft-reboot forces the NIC hardware to reset its internal index to 0 */

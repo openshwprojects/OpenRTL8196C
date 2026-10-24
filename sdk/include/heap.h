@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define HEAP_REGION_BASE 0xA0700000u
-#define HEAP_REGION_SIZE (1536u * 1024u) /* 1.5 MB: 0xA0700000..0xA0880000 */
+#define HEAP_REGION_BASE 0x80700000u
+#define HEAP_REGION_SIZE (1536u * 1024u) /* 1.5 MB: 0x80700000..0x80880000 (cached KSEG0) */
 
 void  heap_init(void);
 void *malloc(size_t size);

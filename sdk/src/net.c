@@ -9,6 +9,7 @@
 #include "rtl8196c.h"
 #include "net.h"
 #include "swcore.h"
+#include "timer.h"
 #include "libc.h"
 
 struct arp_entry { uint8_t ip[4]; uint8_t mac[6]; uint8_t port; uint8_t valid; };
@@ -45,7 +46,17 @@ const uint8_t *net_wifi_ip(void)      { return wifi_ip; }
 const uint8_t *net_wifi_netmask(void) { return wifi_mask; }
 const uint8_t *net_wifi_gateway(void) { return wifi_gw; }
 const uint8_t *net_wifi_dns(void)     { return wifi_dns; }
-void net_set_wifi_ip(const uint8_t ip[4])     { memcpy(wifi_ip, ip, 4); net_igmp_report_all(); }
+void net_set_wifi_ip(const uint8_t ip[4])
+{
+    memcpy(wifi_ip, ip, 4);
+    if (wifi_link && (ip[0] | ip[1] | ip[2] | ip[3])) {
+        int saved = tx_port_override;
+        tx_port_override = NET_PORT_WIFI;
+        net_arp_request(wifi_ip);
+        tx_port_override = saved;
+    }
+    net_igmp_report_all();
+}
 void net_set_wifi_netmask(const uint8_t m[4]) { memcpy(wifi_mask, m, 4); }
 void net_set_wifi_gateway(const uint8_t gw[4])
 {
@@ -350,7 +361,8 @@ int net_ip_send(const uint8_t dst_ip[4], uint8_t proto, const uint8_t *payload, 
         net_arp_request(nexthop);
         tx_port_override = saved_override;
         if (!in_net_poll) {
-            for (int tries = 0; tries < 200 && !e; tries++) {
+            uint32_t t_arp = micros();
+            while (elapsed_us(t_arp) < 15000u && !e) {
                 net_poll();
                 e = cache_find_if(nexthop, on_wifi);
             }

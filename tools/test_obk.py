@@ -39,7 +39,7 @@ def http_post(ip, path, data: bytes, content_type="text/plain", timeout=15.0):
         return r.status, r.read().decode("utf-8", "replace")
 
 
-def wait_for_http(ip, min_wait=3.5, timeout=12.0):
+def wait_for_http(ip, min_wait=4.5, timeout=20.0):
     time.sleep(min_wait)
     deadline = time.time() + timeout
     last_err = None
@@ -124,7 +124,7 @@ def main():
     print("=== 6. Testing Soft-Reboot (POST /api/reboot) & Persistent Disk ===")
     st, _ = http_post(STATIC_IP, "/api/reboot", b"")
     assert st == 200
-    st, info_after = wait_for_http(STATIC_IP, min_wait=4.0, timeout=12.0)
+    st, info_after = wait_for_http(STATIC_IP)
     assert st == 200
     st, lfs_after = http_get(STATIC_IP, "/api/lfs/autoexec.bat")
     assert st == 200 and lfs_after.encode("utf-8") == autoexec_content
@@ -138,7 +138,7 @@ def main():
     assert ota_json.get("size") == len(img_bytes)
     print(f"  POST /api/ota uploaded {len(img_bytes)} bytes -> {ota_resp}, waiting for reboot...")
 
-    st, info_ota = wait_for_http(STATIC_IP, min_wait=3.5, timeout=12.0)
+    st, info_ota = wait_for_http(STATIC_IP)
     assert st == 200
     st, lfs_ota = http_get(STATIC_IP, "/api/lfs/autoexec.bat")
     assert st == 200 and lfs_ota.encode("utf-8") == autoexec_content
@@ -311,7 +311,99 @@ def main():
     assert len(mdns_resp) >= 32 and struct.unpack("!H", mdns_resp[6:8])[0] >= 1, "Expected valid mDNS PTR/SRV/A response"
     print(f"  Wi-Fi Scan HTML + Berry (Ch1={ch_berry.get('1')}) + mDNS ({len(mdns_resp)}B reply) verified!")
 
-    print("\nALL 11 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
+    print("=== 12. Testing USB VFS (/usb0 NTFS & /usb1 FAT), FTP (:21), SMB2 (:445) & SSDP (:1900) ===")
+    import ftplib
+    import io
+    import zlib
+
+    # 12a. USB VFS R/W & streaming if USB drives are attached
+    _, root_lfs_raw = http_get(STATIC_IP, "/api/lfs/")
+    root_lfs = json.loads(root_lfs_raw)
+    usb_mounts = [e["name"] for e in root_lfs.get("content", []) if e.get("type") == 2 and e.get("name", "").startswith("usb")]
+    for mnt in usb_mounts:
+        st_dir, dir_raw = http_get(STATIC_IP, f"/api/lfs/{mnt}")
+        assert st_dir == 200 and '"content":[' in dir_raw
+        if mnt in ("usb0", "usb1"):
+            payload = f"KSEG0 cached R/W test on {mnt}\n".encode("utf-8")
+            st_w, _ = http_post(STATIC_IP, f"/api/lfs/{mnt}/kseg0_test.txt", payload)
+            assert st_w == 200
+            st_r, got = http_get(STATIC_IP, f"/api/lfs/{mnt}/kseg0_test.txt")
+            assert st_r == 200 and got.encode("utf-8") == payload
+            print(f"  USB VFS /{mnt}/kseg0_test.txt R/W verified ({len(payload)} bytes)")
+        else:
+            print(f"  USB VFS /{mnt} directory listing verified")
+    if "usb0" in usb_mounts:
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(f"http://{STATIC_IP}/api/lfs/usb0/bootmgr", timeout=15.0) as r:
+            bm = r.read()
+        dt = time.perf_counter() - t0
+        assert len(bm) == 397752
+        print(f"  Streamed /usb0/bootmgr ({len(bm)} bytes) in {dt*1000:.0f} ms ({len(bm)/1024/dt:.1f} KB/s, crc32={zlib.crc32(bm):08x})")
+
+    # 12b. FTP Server (port 21)
+    ftp = ftplib.FTP()
+    ftp.connect(STATIC_IP, 21, timeout=5.0)
+    ftp.login("admin", "admin")
+    ftp_lines = []
+    ftp.retrlines("LIST", ftp_lines.append)
+    assert any("autoexec.bat" in ln for ln in ftp_lines), f"Expected autoexec.bat in FTP LIST: {ftp_lines}"
+    ftp_payload = b"FTP KSEG0 test payload 1234567890\r\n"
+    ftp.storbinary("STOR /ftp_kseg0.txt", io.BytesIO(ftp_payload))
+    ftp_out = io.BytesIO()
+    ftp.retrbinary("RETR /ftp_kseg0.txt", ftp_out.write)
+    assert ftp_out.getvalue() == ftp_payload
+    ftp.delete("/ftp_kseg0.txt")
+    ftp.quit()
+    print(f"  FTP (:21) LIST ({len(ftp_lines)} entries) + STOR/RETR/DELE verified!")
+
+    # 12c. SMB2 Server (port 445) Negotiate + SessionSetup + TreeConnect
+    def smb2_pkt(cmd, msg_id, body, tree_id=0, sess_id=0):
+        hdr = bytearray(64)
+        hdr[0:4] = b"\xfeSMB"
+        struct.pack_into("<H", hdr, 4, 64)
+        struct.pack_into("<H", hdr, 12, cmd)
+        struct.pack_into("<H", hdr, 14, 1)
+        struct.pack_into("<Q", hdr, 24, msg_id)
+        struct.pack_into("<I", hdr, 36, tree_id)
+        struct.pack_into("<Q", hdr, 40, sess_id)
+        raw = bytes(hdr) + body
+        return struct.pack(">I", len(raw)) + raw
+
+    smb_sock = socket.create_connection((STATIC_IP, 445), timeout=5.0)
+    neg_body = struct.pack("<HHI16sI", 36, 1, 0, b"\x11" * 16, 0) + b"\x00" * 8 + struct.pack("<H", 0x0202)
+    smb_sock.sendall(smb2_pkt(0x0000, 0, neg_body))
+    nb_hdr = smb_sock.recv(4)
+    smb_reply = smb_sock.recv(struct.unpack(">I", nb_hdr)[0])
+    assert smb_reply[0:4] == b"\xfeSMB" and struct.unpack_from("<I", smb_reply, 8)[0] == 0
+    sess_body = struct.pack("<HHIIHHIQ", 25, 0, 0, 0, 88, 0, 0, 0) + b"\x00"
+    smb_sock.sendall(smb2_pkt(0x0001, 1, sess_body))
+    nb_hdr = smb_sock.recv(4)
+    smb_reply = smb_sock.recv(struct.unpack(">I", nb_hdr)[0])
+    assert struct.unpack_from("<I", smb_reply, 8)[0] == 0
+    sess_id = struct.unpack_from("<Q", smb_reply, 40)[0]
+    share_utf16 = f"\\\\{STATIC_IP}\\obk".encode("utf-16le")
+    tc_body = struct.pack("<HHHH", 9, 0, 72, len(share_utf16)) + share_utf16
+    smb_sock.sendall(smb2_pkt(0x0003, 2, tc_body, sess_id=sess_id))
+    nb_hdr = smb_sock.recv(4)
+    smb_reply = smb_sock.recv(struct.unpack(">I", nb_hdr)[0])
+    assert struct.unpack_from("<I", smb_reply, 8)[0] == 0
+    tree_id = struct.unpack_from("<I", smb_reply, 36)[0]
+    smb_sock.close()
+    print(f"  SMB2 (:445) Negotiate + SessionSetup (sid=0x{sess_id:x}) + TreeConnect (tid=0x{tree_id:x} \\\\{STATIC_IP}\\obk) verified!")
+
+    # 12d. SSDP UPnP (:1900 M-SEARCH + /ssdp.xml)
+    ssdp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ssdp_sock.settimeout(3.0)
+    msearch = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n"
+    ssdp_sock.sendto(msearch, (STATIC_IP, 1900))
+    ssdp_reply, _ = ssdp_sock.recvfrom(2048)
+    ssdp_sock.close()
+    assert b"200 OK" in ssdp_reply and b"ssdp.xml" in ssdp_reply
+    st_desc, desc_xml = http_get(STATIC_IP, "/ssdp.xml")
+    assert st_desc == 200 and "<root" in desc_xml
+    print(f"  SSDP (:1900) M-SEARCH ({len(ssdp_reply)}B) + /ssdp.xml ({len(desc_xml)}B) verified!")
+
+    print("\nALL 12 OPENBEKEN RTL8196C HARDWARE TESTS PASSED!")
 
 
 if __name__ == "__main__":

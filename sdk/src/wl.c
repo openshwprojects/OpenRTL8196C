@@ -174,22 +174,37 @@ static int tbl_delay(uint32_t reg)
     }
 }
 
-/* ---- rings ---- */
+/* ---- rings (accessed via uncached KSEG1 alias for KSEG0/KSEG1 compatibility) ---- */
+#include "irq.h"
 #define NRX 32
 #define RXBUF 2048
 #define NTX 8
-struct rxdesc { uint32_t w[8]; };                        /* RX descriptor: 32 bytes (8 words) */
-struct desc { uint32_t w[16]; };                         /* TX descriptor: 64-byte stride, 40 bytes used */
-static struct rxdesc rx_ring[NRX] __attribute__((aligned(256)));
-static struct desc tx_ring[NTX] __attribute__((aligned(256)));   /* management / data */
-static struct desc bcn_ring[2] __attribute__((aligned(256)));
-static uint8_t rx_buf[NRX][RXBUF] __attribute__((aligned(32)));
-static uint8_t tx_buf[NTX][RXBUF] __attribute__((aligned(32)));
-static uint8_t bcn_buf[2][RXBUF] __attribute__((aligned(32)));
+struct rxdesc { volatile uint32_t w[8]; };               /* RX descriptor: 32 bytes (8 words) */
+struct desc   { volatile uint32_t w[16]; };              /* TX descriptor: 64-byte stride, 40 bytes used */
+
+#define PHYS(p) ((uint32_t)(uintptr_t)(p) & 0x1FFFFFFFu)
+#define UNC(p)  ((void *)(uintptr_t)(PHYS(p) | 0xA0000000u))
+
+struct wl_dma {
+    struct rxdesc rx_ring[NRX] __attribute__((aligned(256)));
+    struct desc   tx_ring[NTX] __attribute__((aligned(256)));   /* management / data */
+    struct desc   bcn_ring[2]  __attribute__((aligned(256)));
+    uint8_t       rx_buf[NRX][RXBUF] __attribute__((aligned(32)));
+    uint8_t       tx_buf[NTX][RXBUF] __attribute__((aligned(32)));
+    uint8_t       bcn_buf[2][RXBUF]  __attribute__((aligned(32)));
+} __attribute__((aligned(256)));
+
+static struct wl_dma wl_dma_mem __attribute__((aligned(256)));
+#define WLD      ((struct wl_dma *)UNC(&wl_dma_mem))
+#define rx_ring  (WLD->rx_ring)
+#define tx_ring  (WLD->tx_ring)
+#define bcn_ring (WLD->bcn_ring)
+#define rx_buf   (WLD->rx_buf)
+#define tx_buf   (WLD->tx_buf)
+#define bcn_buf  (WLD->bcn_buf)
 static uint32_t rx_next, tx_next, bcn_next;
 
 static uint32_t sw(uint32_t v) { return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24); }
-#define PHYS(p) ((uint32_t)(p) & 0x1FFFFFFFu)
 
 static void rx_arm(uint32_t i)
 {
@@ -298,6 +313,7 @@ static int init_mac(struct wl_dev *d)
     wl_wr16(d, REG_TRXDMA_CTRL, (uint16_t)((rd16(d, REG_TRXDMA_CTRL) & 0xF) | 0xF771));
     wr8(d, REG_FWHW_TXQ_CTRL + 1, 0x1F);
 
+    cctl_write(CCTL_DWBINVAL);
     memset(tx_ring, 0, sizeof tx_ring); memset(bcn_ring, 0, sizeof bcn_ring);
     /* chain each TX ring into a circular linked list (word 10 = next desc) */
     for (uint32_t i = 0; i < NTX; i++) tx_ring[i].w[10] = sw(PHYS(&tx_ring[(i + 1) % NTX]));
@@ -537,7 +553,7 @@ void wl_hw_tx_enable(struct wl_dev *d) { wr8(d, REG_TXPAUSE, 0x00); }
 static void fill_desc(struct desc *de, const uint8_t *buf, uint32_t len, uint8_t qsel, int bmc)
 {
     uint32_t next = de->w[10];                               /* preserve the ring link */
-    memset(de, 0, sizeof *de);
+    for (int i = 0; i < 16; i++) de->w[i] = 0;
     de->w[10] = next;
     /* w0: pkt_size[15:0], offset=32 [23:16], bmc[24], last_seg[26], first_seg[27] */
     /* These are the exact descriptor values of the build a Windows PC joined

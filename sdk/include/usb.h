@@ -26,7 +26,7 @@ enum {
 };
 
 #define USB_CFG_MAX  512
-#define USB_MAX_DEVS 8
+#define USB_MAX_DEVS 16
 
 struct usb_dev {
     int      present;
@@ -62,6 +62,7 @@ int  usb_dev_count(void);
 const struct usb_dev *usb_get_dev(int idx);
 const struct usb_dev *usb_dev_by_addr(int addr);
 int  usb_hub_scan_all(void);             /* powers & enumerates downstream ports on any attached hub(s) */
+int  usb_recover_dev(const struct usb_dev *d); /* resets parent hub port & re-enumerates device at same addr */
 
 /* control transfer on the attached device; returns bytes transferred (IN)
  * or 0 (OUT/no data), negative on error */

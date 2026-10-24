@@ -35,6 +35,22 @@ _start:
     b       1b
     addiu   $t0, $t0, 4
 2:
+    /* Flush zeroed .bss to physical RAM and invalidate I/D caches before main() */
+    mtc0    $zero, $20
+    nop
+    addiu   $t0, $zero, 0x200   /* CCTL_DWBINVAL */
+    mtc0    $t0, $20
+    nop
+    nop
+    mtc0    $zero, $20
+    nop
+    addiu   $t0, $zero, 0x002   /* CCTL_IINVAL */
+    mtc0    $t0, $20
+    nop
+    nop
+    mtc0    $zero, $20
+    nop
+
     jal     main
     nop
 

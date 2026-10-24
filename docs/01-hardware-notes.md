@@ -16,20 +16,23 @@ Cyfrowy Polsat LT-6408n router. Every fact is tagged:
 | SoC | Realtek RTL8196C, chip rev 4 | [measured] kernel log |
 | CPU core | Lexra RLX4181, MIPS-I class (R3000-like), big-endian, no FPU | [sdk], [3rd-party] |
 | CPU clock | 390 MHz ("390MHz" in loader banner, 388 BogoMIPS) | [measured] |
-| Peripheral ("HS1"/lexra bus) clock | 200 MHz on RTL8196E; must be calibrated on 8196C | [sdk] [unverified] |
-| DRAM | 32 MB SDRAM at physical 0x00000000 | [measured] "Memory: 26632k/32768k" |
-| SPI flash | 8 MB MX25L6405 at CS0, controller 0xB8001200 | [measured] |
-| CP0 PRId | 0x0000CD01 (RLX4181 = 0xCD00 family) | [3rd-party] |
-| USB | EHCI at 0x18021000, OHCI at 0x18020000, IRQ 10 | [measured] kernel log |
-| UART0 | 16550A at 0x18002000 (KSEG1: 0xB8002000), kernel IRQ 23 | [measured] kernel log |
+| Peripheral ("HS1"/lexra bus) clock | 200 MHz (calibrated via TC1 with CDBR=200 -> 1.0014 MHz) | [measured, examples/04_timer_poll] |
+| DRAM | 32 MB 16-bit SDR/DDR SDRAM at physical 0x00000000 (`0x80000000` KSEG0 cached / `0xA0000000` KSEG1 uncached) | [measured] "Memory: 26632k/32768k" |
+| Caches | 16 KB I-cache + 8 KB write-back (no write-allocate) D-cache, 32-byte line size, controlled via CP0 `$20` (`CCTL`) | [measured, probes/87_cache_policy, examples/30_ram_exec] |
+| SPI flash | 8 MB Macronix MX25L6405D (`JEDEC C2 20 17`) at CS0, controller `0xB8001200`, MMIO XIP window at `0xBD000000` (uncached) / `0x9D000000` (cached) | [measured] |
+| CP0 PRId | `0x0000CD01` (Lexra RLX4181), `CP0 Status = 0x10000000` at loader entry | [measured, examples/01_hello] |
+| USB | Synopsys EHCI 1.00 at `0x18021000` (`0xB8021000`), OHCI 1.0 at `0x18020000` (`0xB8020000`), IRQ 10 | [measured] |
+| PCIe / Wi-Fi | Root port `10ec:8196` at `0xB8B00000`; attached endpoint `10ec:8191` rev 01 = **Realtek RTL8192CE 2T2R 802.11b/g/n** (`BAR2` at `0xB9000000`) | [measured, examples/23_pcie_probe] |
+| Ethernet Switch | 5-port 10/100 Mbps switch ASIC at `0xBB800000` (PHYs `001c:c880`, LAN1..4 = ports 0..3, WAN = port 4), CPU NIC DMA at `0xB8010000` (IRQ source 8) | [measured, examples/08_eth_link] |
+| UART0 | 16550A at `0x18002000` (KSEG1: `0xB8002000`), IRQ source 7 (Linux IRQ 23), 38400 8N1 | [measured] |
 
 ### Lexra RLX4181 quirks (why a generic MIPS32 toolchain is not enough)
 
 | Quirk | Consequence | Source |
 |-------|-------------|--------|
-| ISA is MIPS-I plus a few extras, `Config.M = 0` | Compile with `-march=mips1` (safe) or `mips32` (works for simple code, risky) | [3rd-party] |
-| `lwl/lwr/swl/swr` reportedly unsupported on Lexra, though one RLX4181 probe says they execute | Avoid unaligned access; write byte-wise `memcpy`; prefer `-march=mips1` and let the compiler avoid them | [3rd-party] conflicting |
-| Load delay slot (R3000 style) | Vendor toolchain pads load delay slots for `-march=4181`; treat hazard as real until probed | [3rd-party] [unverified] |
+| ISA is MIPS-I plus a few extras, `Config.M = 0` | Compile with `-target mips-unknown-elf -march=mips1 -msoft-float` | [measured] |
+| `lwl/lwr/swl/swr` are **unimplemented** in hardware and raise Reserved Instruction (`Cause.ExcCode = 10`) | Emulated transparently in `sdk/src/exception.S` (`emulate_unaligned`), and avoided by compiling with `-march=mips1` | [measured] |
+| Load delay slot (R3000 style) | Handled automatically by `-march=mips1` | [measured] |
 | No CP0 `Count`/`Compare` | No free CPU timer; use SoC timer block TC0/TC1 | [3rd-party] |
 | General exception vector at **0x80000080** (not 0x80000180) | Install handler trampoline at 0x80000080; `Status.BEV` is already 0 at the loader prompt | [3rd-party] |
 | Exception return is `rfe` in a `jr` delay slot (no `eret`) | Hand-written handler epilogue | [3rd-party] |
@@ -38,22 +41,67 @@ Cyfrowy Polsat LT-6408n router. Every fact is tagged:
 | **D-cache is write-back.** CCTL `0x001` (DINVAL) drops dirty lines: 64 cached stores followed by DINVAL were all lost, even after a 10 ms wait or an unrelated uncached read. `0x100` writes dirty lines back, `0x200` writes back and invalidates. CPU reads through the KSEG1 alias of a dirty line return the cached value, so "store cached, read uncached" looks like write-through; DMA masters see only RAM. No write-allocate: a store that misses goes straight to RAM, so only lines already in the cache become dirty (OTA test: a 15 KB copy to never-cached 0x8050xxxx followed by DINVAL arrived intact) | Never use DINVAL alone in running code. Before a device reads cached memory: `CCTL_DWB`. Around a device write into cached memory: `CCTL_DWBINVAL` before and after, buffer 32-byte aligned and padded to whole cache lines | [measured, probes/87_cache_policy, 85_usb_zero_copy] |
 | Writing `WDTCNR = 0` triggers a watchdog reboot back to the loader | Handy software reset | [3rd-party] |
 
-## 2. Memory map (KSEG1, uncached)
+## 2. Consolidated Hardware IDs, Memory Map & Flash Layout
+
+### 2.1 Silicon & Peripheral Hardware IDs
+
+| Component | Hardware ID / Signature | Register / Address | Details |
+|-----------|-------------------------|--------------------|---------|
+| **SoC Strap / Rev** | `0x80000002` | `0xB8000000` (`SYS_BASE`) | Realtek **RTL8196C** rev 4, 40 MHz crystal strap |
+| **CPU Core (`PRId`)** | `0x0000CD01` | CP0 `$15` (`PRId`) | **Lexra RLX4181** (390 MHz CPU, 200 MHz `LX`/`HS1` bus) |
+| **CP0 Initial `Status`** | `0x10000000` | CP0 `$12` (`Status`) | `CU0 = 1`, `BEV = 0` (exception vector at `0x80000080`) |
+| **SPI NOR Flash (JEDEC)** | `C2 20 17` | `RDID` (`0x9F`) via `0xB8001208` | **Macronix MX25L6405D / MX25L6406E** (64 Mbit = **8 MB**) |
+| **SPI Controller (`SFCR` / `SFCR2`)** | `0x3F800000` / `0x0BC08000` | `0xB8001200` / `0xB8001204` | 8198-style SPI PIO + `0x0B` Fast-Read XIP window |
+| **Ethernet Switch PHYs (×5)** | `001c:c880` (`OUI 0x000732`) | MDIO `0xBB804004` (PHY `0..4`) | 5× internal 10/100 Mbps PHYs (`LAN1..4` = ports `0..3`, `WAN` = port `4`) |
+| **PCIe Root Port (RC)** | `10ec:8196` (class `0604`) | `0xB8B00000` (PCIe RC cfg) | Realtek RTL8196C PCIe 1.1 x1 Root Complex (`LTSSM = 0x11` L0) |
+| **Wi-Fi PCIe Endpoint (EP)** | `10ec:8191` (rev `01`, class `0280`) | `0xB8B10000` (PCIe EP cfg) | **Realtek RTL8192CE** 2T2R 802.11b/g/n 2.4 GHz (`BAR2` at `0xB9000000`) |
+| **Wi-Fi Chip Variant** | `SYS_CFG = 0x08400339`, `HPON_FSM = 0x98053F15` | `0xB90000F0` / `0xB90000EC` | Bit 27 = `92C` (**2T2R**), TSMC A-cut production silicon, 8051 FW `v69.0` (`11,615 B`) |
+| **USB 2.0 Host Controllers** | EHCI rev `0x0100` / OHCI rev `0x0010` | `0xB8021000` / `0xB8020000` | Synopsys High-Speed EHCI (1 port) + Full/Low-Speed OHCI companion |
+| **Factory Config Header** | Magic `"H601"` (`48 36 30 31`) | Flash `0x006000` (`0xBD006000`) | Board factory MAC (`80:1f:02:ca:ad:92`, Edimax OUI) at `0x006007` (`0xBD006007`) |
+
+### 2.2 Peripheral MMIO Map (`KSEG1`, uncached)
 
 | Base | Block | Source |
 |------|-------|--------|
-| 0xB8000000 | System control (`PIN_MUX_SEL` at +0x40, strap/clock regs) | article [measured by author] |
-| 0xB8001200 | SPI flash controller (SFCSR/SFDR) | [3rd-party] |
-| 0xB8002000 | UART0 (16550) | [measured] |
-| 0xB8003000 | Interrupt controller (GIMR/GISR/IRR0-3) | [sdk] |
-| 0xB8003100 | Timer/counter block (TC0, TC1, CDBR, WDT) | [sdk] |
-| 0xB8003500 | GPIO ports A-D | article |
-| 0xB8020000 | OHCI, 0xB8021000 EHCI | [measured] |
+| `0xB8000000` | System control (`CLK_MANAGE` at `+0x10`, `USB_PHY` at `+0x34`, `PIN_MUX_SEL` at `+0x40`, `PCIE_PHY` at `+0x50`) | [measured] |
+| `0xB8001200` | SPI flash controller (`SFCR` `+0x00`, `SFCR2` `+0x04`, `SFCSR` `+0x08`, `SFDR` `+0x0C`) | [measured] |
+| `0xB8002000` | UART0 (16550A, big-endian byte in MSB of each 32-bit word) | [measured] |
+| `0xB8003000` | Interrupt controller (`GIMR` `+0x00`, `GISR` `+0x04`, `IRR0..3` `+0x08..+0x14`) | [measured] |
+| `0xB8003100` | Timer/counter & watchdog block (`TC0`, `TC1`, `CDBR`, `WDTCNR`) | [measured] |
+| `0xB8003500` | GPIO ports A–D (`PABCD_CNR`, `PABCD_DIR`, `PABCD_DAT`, `PABCD_ISR`, `PAB_IMR`, `PCD_IMR`) | [measured] |
+| `0xB8010000` | Switch CPU-port NIC DMA rings (`CPUICR`, `CPURPDCR0..5`, `CPURMDCR0`, `CPUTPDCR0/1`, `CPUIIMR`, `CPUIISR`) | [measured] |
+| `0xB8020000` | USB 1.1 OHCI (`0xB8020000`) & USB 2.0 EHCI (`0xB8021000`) | [measured] |
+| `0xB8B00000` | PCIe Root Complex config (`0xB8B00000`), PHY (`0xB8B01000`), Endpoint config (`0xB8B10000`) | [measured] |
+| `0xB9000000` | RTL8192CE Wi-Fi MAC/BB/RF MMIO window (`BAR2`) | [measured] |
+| `0xBB800000` | 5-port Ethernet Switch ASIC (`MDCIOCR` `+0x4004`, `PCRP0..4` `+0x4104`, `PSRP0..4` `+0x4128`, `FFCR` `+0x4428`) | [measured] |
+| `0xBD000000` | 8 MB SPI NOR Flash memory-mapped read window (`0x9D000000` cached `KSEG0` / `0xBD000000` uncached `KSEG1`) | [measured] |
 
-RAM aliases: physical 0x00500000 is 0x80500000 cached (KSEG0) and
-0xA0500000 uncached (KSEG1). The loader stages the Linux image at
-0x80500000, so anything we load there is overwritten only on the next
-boot, never while running. [measured] "Jump to image start=0x80500000".
+### 2.3 32 MB SDRAM & Cache Layout
+
+| Memory / Region | Size | Physical Address | Virtual (`KSEG0` Cached) | Virtual (`KSEG1` Uncached) | Notes |
+|-----------------|-----:|------------------|--------------------------|----------------------------|-------|
+| **I-Cache** | **16 KB** | — | `0x80000000..` | — | 32-byte line, invalidated via `CCTL = 0x002` |
+| **D-Cache** | **8 KB** | — | `0x80000000..` | — | Write-back, no write-allocate, 32-byte line (`CCTL = 0x200` `DWBINVAL`) |
+| **SDRAM (Total)** | **32 MB** (`32,768 KB`) | `0x00000000` – `0x01FFFFFF` | `0x80000000` – `0x81FFFFFF` | `0xA0000000` – `0xA1FFFFFF` | 16-bit data bus (`DRAM Spreading Spectrum: ON, T:4 R:6`) |
+| **Exception Trampoline** | **32 B** | `0x00000080` | `0x80000080` | `0xA0000080` | Lexra general exception vector |
+| **Stage-2 Bootloader (`16_stage2`)** | **~24 KB** | `0x00400000` | `0x80400000` | `0xA0400000` | Loaded from flash `0x010000` (`cs6c` header), selects active A/B slot |
+| **OpenBeken Firmware (`.text`/`.data`/`.bss`)** | **~716 KB** image + `.bss` | `0x00500000` | **`0x80500000`** | `0xA0500000` | Executes in cached `KSEG0`; DMA rings accessed via `KSEG1` alias |
+| **OpenBeken Dynamic Heap (`heap.c`)** | **1.5 MB** (`1,572,864 B`) | `0x00600000+` (in `.bss`) | `0x80600000+` | — | ~`1.13–1.49 MB` free during normal operation with 4 active drivers |
+| **Clean Boot Image Snapshot** | **716 KB** | `0x00900000` | `0x80900000` | `0xA0900000` | Saved before `.data`/`.bss` mutation for sub-second soft reboot |
+| **CPU Stack Top** | grows down | `0x00F00000` | `0x80F00000` | `0xA0F00000` | 16-byte aligned top of stack |
+| **OTA Staging Buffer** | **2.0 MB** (`2,097,152 B`) | `0x01000000` – `0x011FFFFF` | `0x81000000` | `0xA1000000` | Receives full firmware image over TCP `:9698` or HTTP `/ota` before flashing |
+
+### 2.4 8 MB SPI NOR Flash Partition Map (`sdk/include/flash_layout.h`)
+
+| Partition | Flash Offset | Size | Magic / Format | Purpose |
+|-----------|--------------|-----:|----------------|---------|
+| `boot` | `0x000000` – `0x00FFFF` | **64 KB** | Realtek Boot v1.1f + `H601` (`0x006000`) + `6V03` (`0x008000`) | Stock 1st-stage bootloader & factory MAC/RF calibration (**never written**; hardware guard `< 0x010000`) |
+| `stage2` | `0x010000` – `0x01DFFF` | **56 KB** | `cs6c` (`start = 0xA0400000`) | `16_stage2` A/B chooser booted automatically by stock loader |
+| `bootstate` | `0x01E000` – `0x01EFFF` | **4 KB** | `BTRY` / `BCNF` | Append-only 16-byte A/B boot counter & rollback confirmation records |
+| `ptable` | `0x01F000` – `0x01FFFF` | **4 KB** | `RPT1` (`0x52505431`) | Partition table descriptor |
+| `appA` (`slotA`) | `0x020000` – `0x21FFFF` | **2.0 MB** (`2,048 KB`) | `RAPP` (`0x52415050`) | Primary OpenBeken firmware slot (`seq=45`, `load = 0x80500000`, CRC32-verified) |
+| `appB` (`slotB`) | `0x220000` – `0x41FFFF` | **2.0 MB** (`2,048 KB`) | `RAPP` (`0x52415050`) | Secondary OpenBeken OTA firmware slot (`seq=44`, `load = 0x80500000`, CRC32-verified) |
+| `lfs` + `cfg` | `0x420000` – `0x7FFFFF` | **3.875 MB** (`3,968 KB`) | `VFLASH` + LittleFS v2 | OpenBeken config (`0x421000`), flash vars (`0x428000`), and LittleFS (`0x430000..0x4AFFFF`, 512 KB) |
 
 ## 3. UART0 (16550 compatible)
 
@@ -75,9 +123,9 @@ LSR bits: 0x01 DR (data ready), 0x20 THRE (transmit holding empty),
 0x40 TEMT (transmitter empty). IER bits: 0x01 RX data available, 0x02 THR
 empty. The loader leaves the port at 38400 8N1. [measured]
 
-Open question from the article: the author lost characters when polling
-THRE. A probe should print the raw LSR value to see whether it must be
-read as a 32-bit word (`>> 24`). [unverified]
+Both byte reads (`REG8(0xB8002014) & 0x20`) and 32-bit word reads
+(`(REG32(0xB8002014) >> 24) & 0x20`) return `LSR` cleanly with zero dropped
+characters (`sdk/src/uart.c`). [measured]
 
 ## 4. Interrupt controller (0xB8003000) [sdk, RTL8196E header]
 
@@ -221,6 +269,19 @@ Measured on our board (2026-10-15):
   one command per 16 KB, not by the bus.
 - An SD card reader was never detected (no connect at all) while a
   high-speed pendrive is, so the reader itself is the suspect.
+
+### 6b.1 Bench USB 2.0 Hub Topology & 4 Simultaneous Drives (Including 500 GB NTFS HDD) [measured]
+
+`sdk/src/usb.c`, `sdk/src/usb_msc.c`, and `hal_vfs_rtl8196c.c` support multi-tier High-Speed USB 2.0 hubs (`USB_MAX_DEVS = 16`, up to 4 concurrent mass-storage volumes `/usb0`..`/usb3`). Verified with 6 USB devices enumerated simultaneously across two cascaded 4-port hubs (`usb_status`):
+
+| USB Addr | Hub / Port | VID:PID | USB Product String | Speed | VFS Mount | Filesystem & Volume Label | Capacity |
+|:--------:|------------|---------|--------------------|-------|-----------|---------------------------|---------:|
+| `addr 1` | `hub 0 port 0` | `1a40:0101` | Terminus Technology `USB 2.0 Hub` | High (`480 Mbps`) | — | 4-port USB 2.0 Root Hub (tier 1) | — |
+| `addr 2` | `hub 1 port 1` | `1a40:0101` | Terminus Technology `USB 2.0 Hub` | High (`480 Mbps`) | — | 4-port USB 2.0 Cascaded Hub (tier 2) | — |
+| `addr 3` | `hub 1 port 3` | `090c:2000` | Silicon Motion `USB Disk 3.0` | High (`480 Mbps`) | **`/usb0`** | **NTFS** (`"Windows 10"`, RW) | **59,380 MB** (`58.0 GiB`) |
+| `addr 4` | `hub 2 port 2` | `05e3:0751` | Genesys Logic `USB Storage` (`Generic STORAGE DEVICE`) | High (`480 Mbps`) | **`/usb1`** | **FAT16** (`"PHONE CARD"`, RW) | **942 MB** (`0.92 GiB`) |
+| `addr 5` | `hub 2 port 3` | `ffff:5678` | `VendorCo ProductCode` (`Disk 2.0`) | High (`480 Mbps`) | **`/usb2`** | **FAT32** (`"SLITAZ CORE"`, RW) | **961 MB** (`0.94 GiB`) |
+| `addr 6` | `hub 2 port 1` | `152d:0578` | JMicron JMS578 `External USB 3.0` (`External USB3.0`) | High (`480 Mbps`) | **`/usb3`** | **NTFS** (`"Windows"`, RW) | **476,940 MB** (`465.76 GiB` / **500 GB HDD**, `976,771,072` sectors) |
 
 ## 6c. PCIe and the Wi-Fi chip [measured, examples/23_pcie_probe]
 
@@ -422,12 +483,11 @@ window. Useful commands [article, OpenWrt wiki]:
 | FLR / FLW | | flash read / write (dangerous) |
 | HELP | | list |
 
-The loader's own entry status on our board is still open: ESC sent at
-"Booting..." and ESC flooded from power-on both failed to stop the boot,
-and the running Linux console ignores typed commands as well. Either the
-stock firmware has no serial shell and the ESC window is very short, or
-the adapter's TX line is not reaching the SoC. The next step is a
-hardware check of the TX wire (see docs/02-bring-up-log.md).
+The `<RealTek>` loader prompt is entered by sending `ESC` (`0x1B`) at
+`38400 8N1` during the ~1-second boot window right after `"Booting..."`.
+`tools/flash.py` and `tools/flash_obk.py` automate this by power-cycling the
+router (via the `bench.OBK` smart socket or manual power-on) while streaming
+`ESC` bytes until `<RealTek>` responds.
 
 ## 9. Sources
 

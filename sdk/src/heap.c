@@ -1,8 +1,8 @@
 /*
  * heap.c - 8-byte aligned coalescing free-list allocator for RTL8196C.
  *
- * Uses SDRAM region 0xA0700000..0xA0880000 (1.5 MB), well above the
- * firmware image (0xA0500000) and stack (0xA0600000).
+ * Uses cached KSEG0 SDRAM region 0x80700000..0x80880000 (1.5 MB), above the
+ * firmware image (0x80500000) and main stack (0x806F0000).
  */
 #include "heap.h"
 #include "libc.h"
