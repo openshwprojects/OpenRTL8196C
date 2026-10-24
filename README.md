@@ -1,20 +1,31 @@
 # OpenRTL8196C
 
+**Main presentation:** https://www.elektroda.com/rtvforum/topic4185977.html
+
 A from-scratch bare-metal SDK for the Realtek RTL8196C (Lexra RLX4181
 MIPS core) as found in cheap routers such as the Cyfrowy Polsat / Edimax
 LT-6408n. Programs are compiled on Windows with clang, pushed into RAM
 through the stock boot loader's UART console (EW/DW/J commands) and run
 without touching the flash.
 
-Inspired by p.kaczmarek2's elektroda.pl series on this router.
+On top of the SDK runs a full OpenBeken port (`PLATFORM_RTL8196C`) that
+turns the router into a Home Assistant / MQTT controller and a small file
+server: USB drives (FAT/exFAT/NTFS, read/write) shared over FTP and SMB2.
+
+Inspired by p.kaczmarek2's elektroda.pl series on this router. Previous part:
+[Pierwsze kroki z programowaniem RTL8196C z routera - wgrywanie, blink, UART](https://www.elektroda.pl/rtvforum/topic4179473.html)
+(first steps: loading code, blink, UART; in Polish).
 
 ## Layout
 
 ```
-docs/       research notes and the bring-up log
-sdk/        startup code, linker script, drivers (uart, irq, timer, gpio), tiny libc/printf
-examples/   01_hello 02_counter 03_blink 04_timer_poll 05_timer_irq 06_uart_echo 07_uart_irq
-tools/      build.py (clang/lld), flash.py (loader + OpenBeken power cycle), uart_boot_capture.py
+docs/         research notes, the bring-up log, flash layout, Wi-Fi and OpenBeken notes
+sdk/          startup code, linker script, drivers, TCP/IP, USB, PCIe, Wi-Fi, RTOS shim, tiny libc
+examples/     01_hello .. 30_ram_exec (see the status table below)
+probes/       one-off hardware experiments, not maintained
+screenshots/  OpenBeken Web UI, Home Assistant, FTP and SMB2 screenshots
+tools/        build.py (clang/lld), flash.py (UART loader), ota.py, flashdump.py, mkimage.py,
+              build_obk.py / flash_obk.py / test_obk.py (OpenBeken), netcon.py, bench.py
 ```
 
 ## Requirements
@@ -47,7 +58,7 @@ to your terminal.
 - [docs/05-wifi-handover.md](docs/05-wifi-handover.md): RTL8192CE Wi-Fi bring-up, AP/STA drivers, and hardware notes
 - [docs/06-openbeken-vfs-ftp.md](docs/06-openbeken-vfs-ftp.md): Dual-homed OpenBeken Wi-Fi, unified LittleFS + USB (FAT/exFAT/NTFS) VFS, 10 MB streaming HTTP, FTP (`drv_ftp.c`), & SMB2 (`drv_smb.c`) server benchmarks
 
-## Status (2026-10-17)
+## Status (2026-10-23)
 
 Working on the LT-6408n board, all verified over the real UART and Ethernet:
 
@@ -84,8 +95,41 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 28_wifi_ap | Wi-Fi: soft-AP demo, beacons an open test network and answers probe/auth/association |
 | 29_wifi_ap_http | **Working**: open Wi-Fi AP with DHCP, captive DNS and the SDK web server at http://192.168.4.1/ (`wl_ap.c`, `dhcpd.c`, `dnsd.c`); a PC joins and gets the page over the air |
 | 30_ram_exec | **Working**: SPI NOR Flash XIP (`0xBD`/`0x9D`) vs Uncached SDRAM (`KSEG1` `0xA0500000`) vs Cached SDRAM (`KSEG0` `0x80500000` I-cache + D-cache) execution profiler (`69.9x` over SPI XIP, `43.0x` on WPA2 PBKDF2-SHA1) |
+| 30_usb_hub_msc | USB hub with up to 4 mass-storage drives at once: each mounted as `/usb0..3` (FatFs or NTFS) with an interleaved cross-drive read check |
 
 Wi-Fi state, code map, hardware gotchas and the plan for OpenBeken over Wi-Fi: `docs/05-wifi-handover.md`.
+
+## OpenBeken on the router
+
+Details, all benchmarks and the full screenshot gallery:
+[docs/06-openbeken-vfs-ftp.md](docs/06-openbeken-vfs-ftp.md).
+
+- Ethernet and Wi-Fi at the same time. With no Wi-Fi network configured (or
+  when joining fails) it starts an open AP `OpenRTL8196C Router` at
+  `192.168.4.1` with DHCP and captive DNS.
+- MQTT 3.1.1 + Home Assistant discovery: the 7 router LEDs show up as switches.
+- Unified VFS: LittleFS on the SPI flash plus `/usb0..3` (FAT12/16/32, exFAT,
+  NTFS, read/write), several drives at once through a USB hub on the single port.
+- FTP server (`drv_ftp.c`, port 21, passive data on 2121) and SMB2 server
+  (`drv_smb.c`, dialects 2.0.2/2.1, NTLMv2 + HMAC-SHA256 signing, shares
+  `\\<ip>\obk` and `\\<ip>\usb0..3`) that Windows 10/11 accepts without
+  enabling insecure guest access. Both use only the OpenBeken `lfs_*` API.
+- `/api/lfs/` streams files in 4 KB chunks, so file size is no longer limited
+  by free heap.
+
+Running OpenBeken from cached `KSEG0` instead of uncached `KSEG1` made file
+downloads (397,752 B file from the NTFS stick) several times faster:
+
+| Path | Uncached | Cached |
+|------|---------:|-------:|
+| HTTP `/api/lfs/` | ~360 KB/s | 3.60 MB/s |
+| FTP `RETR` | ~384 KB/s | 2.21 MB/s |
+| SMB2 `READ` (signed) | ~327 KB/s | 1.19 MB/s |
+| CrystalDiskMark `SEQ1M Q1T1` on the mapped SMB2 drive | ~327 KB/s R / ~600 KB/s W | 3.77 MB/s R / 2.72 MB/s W |
+
+![Four USB drives mapped from the router as SMB2 network drives](screenshots/44_explorer_this_pc_mapped_smb_drives.png)
+![The router as an MQTT device in Home Assistant](screenshots/19_ha_device_toggled.png)
+![CrystalDiskMark on the mapped SMB2 share](screenshots/47_crystaldiskmark_smb_usb.png)
 
 The experiments that measured the undocumented bits live in `probes/`
 (timer layout, exception vector, interrupt routing, the Ethernet receive
@@ -95,6 +139,8 @@ hunt, SPI flash PIO). They build the same way but are not maintained as examples
 
 ```
 sdk/include/board_config.h   MAC, IP, ports: the only per-bench constants
+sdk/src/start.S              entry point after the loader's J: stack, cache invalidate, .bss clear
+sdk/src/libc.c softfp.c      MIPS-I C runtime (byte-wise memcpy etc.) and software float / 64-bit math
 sdk/src/uart.c printf.c      polled UART, tiny printf/snprintf/vsnprintf
 sdk/src/timer.c              TC0/TC1, calibrated delay_ms/micros/timer_ms/every_ms, watchdog
 sdk/src/irq.c exception.S    Lexra vector trampoline, context save, lwl/lwr/swl/swr emulation, ota_reloc_stub
@@ -110,6 +156,7 @@ sdk/src/heap.c               1.5 MB dynamic memory allocator (malloc/free/calloc
 sdk/src/rtos.c rtos_switch.S cooperative FreeRTOS/Beken task scheduler, software timers, mutexes
 sdk/src/lwip_sockets.c       BSD / lwIP socket & DNS layer on top of net.c/tcp.c
 sdk/src/lwip_mqtt.c          MQTT 3.1.1 client on top of tcp.c
+sdk/src/lwip_mdns.c          mDNS / DNS-SD responder (<hostname>.local, _http._tcp) on Ethernet and Wi-Fi
 sdk/src/httpd.c              HTTP/1.1 GET/HEAD with routes on top of tcp.c
 sdk/src/console.c cli.c      the command set (peek/poke/led/...), string builder, parsers
 sdk/src/statuspage.c         the status web pages used by 12, 13 and 15
@@ -117,7 +164,7 @@ sdk/src/usb.c                USB host: EHCI + OHCI, hotplug, control/bulk/interr
 sdk/src/hid.c                HID report descriptor parser (mouse layout incl. wheel)
 sdk/src/usb_msc.c            USB mass storage: bulk-only transport + SCSI (read/write sectors)
 sdk/src/fat.c                read-only FAT12/16/32 with long file names
-sdk/src/ntfs.c               read-only NTFS (MBR/GPT, fragmented and sparse files, attribute lists, UTF-8 names)
+sdk/src/ntfs.c               NTFS (MBR/GPT, fragmented and sparse files, attribute lists, UTF-8 names), plus create/write/truncate/remove used by the OpenBeken VFS
 sdk/src/pcie.c               PCIe root port: stock bring-up sequence, BAR2 window at 0xB9000000, power down
 sdk/src/wl.c                 RTL8192CE Wi-Fi driver: MAC/BB/RF bring-up, firmware, fuse read, TX/RX rings, channel, op-mode
 sdk/src/wl_ap.c              soft AP: beacons, probe/auth/assoc, client table, 802.11 <-> Ethernet bridge for net.c
