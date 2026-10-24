@@ -52,6 +52,15 @@ static uint32_t next_task_gen = 1;
 static void (*bg_poll_fn)(void) = 0;
 static beken_timer_t *active_timers[MAX_TIMERS];
 
+#define MAX_SYS_TIMEOUTS 8
+struct sys_to_entry {
+    int      active;
+    uint32_t fire_ms;
+    void   (*handler)(void *arg);
+    void    *arg;
+};
+static struct sys_to_entry sys_timeouts[MAX_SYS_TIMEOUTS];
+
 static int slot_from_handle(TaskHandle_t h)
 {
     if (!h)
@@ -71,6 +80,7 @@ void rtos_init(void)
         return;
     memset(tasks, 0, sizeof(tasks));
     memset(active_timers, 0, sizeof(active_timers));
+    memset(sys_timeouts, 0, sizeof(sys_timeouts));
     tasks[0].state = TASK_READY;
     tasks[0].handle_id = 1;
     strcpy(tasks[0].name, "main");
@@ -121,6 +131,15 @@ static void pump_background(void)
         if (t && t->running && t->cb && (int32_t)(now - t->next_fire_ms) >= 0) {
             t->next_fire_ms = now + t->period_ms;
             t->cb(t->arg);
+        }
+    }
+    for (int i = 0; i < MAX_SYS_TIMEOUTS; i++) {
+        if (sys_timeouts[i].active && (int32_t)(now - sys_timeouts[i].fire_ms) >= 0) {
+            void (*fn)(void *) = sys_timeouts[i].handler;
+            void *a            = sys_timeouts[i].arg;
+            sys_timeouts[i].active = 0;
+            if (fn)
+                fn(a);
         }
     }
 
@@ -484,3 +503,30 @@ int rtos_is_timer_init(beken_timer_t *timer)
 {
     return timer ? timer->initialized : 0;
 }
+
+void sys_timeout(uint32_t msecs, void (*handler)(void *arg), void *arg)
+{
+    if (!handler)
+        return;
+    for (int i = 0; i < MAX_SYS_TIMEOUTS; i++) {
+        if (!sys_timeouts[i].active) {
+            sys_timeouts[i].active  = 1;
+            sys_timeouts[i].fire_ms = timer_ms() + msecs;
+            sys_timeouts[i].handler = handler;
+            sys_timeouts[i].arg     = arg;
+            return;
+        }
+    }
+}
+
+void sys_untimeout(void (*handler)(void *arg), void *arg)
+{
+    for (int i = 0; i < MAX_SYS_TIMEOUTS; i++) {
+        if (sys_timeouts[i].active &&
+            sys_timeouts[i].handler == handler &&
+            sys_timeouts[i].arg == arg) {
+            sys_timeouts[i].active = 0;
+        }
+    }
+}
+

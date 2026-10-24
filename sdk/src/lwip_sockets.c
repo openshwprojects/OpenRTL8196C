@@ -18,6 +18,9 @@
 #include "obk_shim/lwip/sockets.h"
 #include "obk_shim/lwip/netdb.h"
 #include "obk_shim/lwip/dns.h"
+#include "obk_shim/lwip/raw.h"
+#include "obk_shim/lwip/icmp.h"
+#include "obk_shim/lwip/inet_chksum.h"
 
 #define MAX_BSD_SOCKETS  24
 #define SOCK_RX_BUF_SIZE 32768
@@ -1024,3 +1027,132 @@ __attribute__((weak)) void usleep(int r)
 {
     delay_us((uint32_t)(r > 0 ? r : 1));
 }
+
+/* ------------------------------------------- lwIP pbuf / raw / ICMP shims */
+u16_t inet_chksum(const void *dataptr, u16_t len)
+{
+    return net_checksum((const uint8_t *)dataptr, len, 0);
+}
+
+struct pbuf *pbuf_alloc(u8_t layer, u16_t length, u8_t type)
+{
+    (void)layer;
+    struct pbuf *p = (struct pbuf *)malloc(sizeof(struct pbuf) + PBUF_IP_HLEN + length);
+    if (!p)
+        return 0;
+    p->next    = 0;
+    p->payload = (uint8_t *)(p + 1) + PBUF_IP_HLEN;
+    p->tot_len = length;
+    p->len     = length;
+    p->type    = type;
+    p->flags   = 0;
+    p->ref     = 1;
+    return p;
+}
+
+u8_t pbuf_header(struct pbuf *p, s16_t header_size_increment)
+{
+    if (!p)
+        return 1;
+    if (header_size_increment < 0 && (u16_t)(-header_size_increment) > p->len)
+        return 1;
+    p->payload = (uint8_t *)p->payload - header_size_increment;
+    p->len     = (u16_t)((s32_t)p->len + header_size_increment);
+    p->tot_len = (u16_t)((s32_t)p->tot_len + header_size_increment);
+    return 0;
+}
+
+u8_t pbuf_free(struct pbuf *p)
+{
+    if (!p)
+        return 0;
+    free(p);
+    return 1;
+}
+
+#define MAX_RAW_PCBS 4
+static struct raw_pcb raw_pcbs[MAX_RAW_PCBS];
+static uint8_t        raw_pcb_used[MAX_RAW_PCBS];
+
+static void lwip_on_icmp_reply(const uint8_t src_ip[4], uint16_t id, uint16_t seq, uint32_t len)
+{
+    (void)len;
+    u16_t pkt_len = (u16_t)(PBUF_IP_HLEN + sizeof(struct icmp_echo_hdr));
+    struct pbuf *p = pbuf_alloc(PBUF_IP, pkt_len, PBUF_RAM);
+    if (!p)
+        return;
+    memset(p->payload, 0, pkt_len);
+    struct icmp_echo_hdr *iecho = (struct icmp_echo_hdr *)((uint8_t *)p->payload + PBUF_IP_HLEN);
+    iecho->type  = ICMP_ER;
+    iecho->code  = 0;
+    iecho->id    = id;
+    iecho->seqno = lwip_htons(seq);
+
+    ip_addr_t addr;
+    memcpy(&addr.addr, src_ip, 4);
+
+    for (int i = 0; i < MAX_RAW_PCBS; i++) {
+        if (raw_pcb_used[i] && raw_pcbs[i].recv) {
+            if (raw_pcbs[i].recv(raw_pcbs[i].recv_arg, &raw_pcbs[i], p, &addr) != 0)
+                return; /* callback ate and freed p */
+        }
+    }
+    pbuf_free(p);
+}
+
+struct raw_pcb *raw_new(u8_t proto)
+{
+    for (int i = 0; i < MAX_RAW_PCBS; i++) {
+        if (!raw_pcb_used[i]) {
+            memset(&raw_pcbs[i], 0, sizeof(raw_pcbs[i]));
+            raw_pcbs[i].protocol = proto;
+            raw_pcb_used[i] = 1;
+            if (proto == IP_PROTO_ICMP)
+                net_icmp_set_reply_handler(lwip_on_icmp_reply);
+            return &raw_pcbs[i];
+        }
+    }
+    return 0;
+}
+
+void raw_recv(struct raw_pcb *pcb, raw_recv_fn recv, void *recv_arg)
+{
+    if (!pcb)
+        return;
+    pcb->recv     = recv;
+    pcb->recv_arg = recv_arg;
+}
+
+err_t raw_bind(struct raw_pcb *pcb, const ip_addr_t *ipaddr)
+{
+    (void)pcb;
+    (void)ipaddr;
+    return ERR_OK;
+}
+
+err_t raw_sendto(struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *ipaddr)
+{
+    (void)pcb;
+    if (!p || !p->payload || !ipaddr || p->tot_len < sizeof(struct icmp_echo_hdr))
+        return ERR_VAL;
+    const struct icmp_echo_hdr *iecho = (const struct icmp_echo_hdr *)p->payload;
+    uint8_t dst_ip[4];
+    memcpy(dst_ip, &ipaddr->addr, 4);
+    uint32_t payload_len = (uint32_t)p->tot_len - (uint32_t)sizeof(struct icmp_echo_hdr);
+    net_icmp_send_echo(dst_ip, iecho->id, lwip_ntohs(iecho->seqno), payload_len);
+    return ERR_OK;
+}
+
+void raw_remove(struct raw_pcb *pcb)
+{
+    if (!pcb)
+        return;
+    for (int i = 0; i < MAX_RAW_PCBS; i++) {
+        if (&raw_pcbs[i] == pcb) {
+            raw_pcb_used[i] = 0;
+            memset(&raw_pcbs[i], 0, sizeof(raw_pcbs[i]));
+            break;
+        }
+    }
+}
+
