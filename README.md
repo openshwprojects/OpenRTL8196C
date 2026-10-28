@@ -146,9 +146,10 @@ python tools/test_examples.py
 The factory loader at the start of flash is never touched (the SPI driver
 refuses writes below `0x10000`), so the UART console is always there to fall
 back to. Make a full flash backup first (`14_flash_backup` +
-`tools/flashdump.py`): it is your way back to the stock firmware, and the
-Wi-Fi examples need it, because the RTL8192CE firmware is extracted from it
-by `tools/extract_wifi_blobs.py` and never committed.
+`tools/flashdump.py`): it is your way back to the stock firmware. The
+RTL8192CE firmware and register tables the Wi-Fi examples and OpenBeken need
+are committed in `sdk/include/wifi_blobs.inc` (extracted from the stock
+firmware by `tools/extract_wifi_blobs.py`).
 
 ## Examples
 

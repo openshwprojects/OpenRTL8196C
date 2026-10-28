@@ -251,7 +251,7 @@ def main():
     for line in r_nm.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3:
-            syms[parts[2]] = int(parts[0], 16)
+            syms[parts[2]] = int(parts[0], 16) & 0xFFFFFFFF   # Linux nm sign-extends to 64 bits
 
     base = int(args.load, 16)
     stack_top = int(args.stack, 16)

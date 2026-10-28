@@ -145,7 +145,7 @@ def build_example(ex: Path, args, binp: Path):
     for line in r.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2] == "_start":
-            start_addr = int(parts[0], 16)
+            start_addr = int(parts[0], 16) & 0xFFFFFFFF   # Linux nm sign-extends to 64 bits
     if start_addr != base:
         sys.exit(f"_start is at {start_addr:#x}, expected {base:#x}: check the linker script")
 
