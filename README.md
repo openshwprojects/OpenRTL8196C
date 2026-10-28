@@ -88,7 +88,7 @@ Working on the LT-6408n board, all verified over the real UART and Ethernet:
 | 21_usb_fatfs | **writes** to a FAT/exFAT stick through FatFs: raw sector test with restore, files in `/rtltest` |
 | 22_usb_ntfs | NTFS stick or disk, read only: volume info, full tree walk, every file read and CRC'd (`ntfs.c`) |
 | 23_pcie_probe | PCIe bring-up (stock sequence), link training, identifies the Wi-Fi chip from its config space, powers the port down again |
-| 24_wifi_fw | Wi-Fi step 1: RTL8192CE power-on and firmware start (needs `tools/extract_wifi_blobs.py` run on your own flash backup; the firmware is never committed) |
+| 24_wifi_fw | Wi-Fi step 1: RTL8192CE power-on and firmware start (firmware and tables in `sdk/include/wifi_blobs.inc`, extracted from the stock flash by `tools/extract_wifi_blobs.py`) |
 | 25_wifi_scan | Wi-Fi step 2: passive scan of channels 1-13, receive only. Lists networks heard (BSSID, SSID, channel, signal, security); same blob requirement as 24 |
 | 26_wifi_active | Wi-Fi step 3: active scan. Sends broadcast probe requests (first on-air TX) and collects probe responses + beacons (`sdk/src/wl.c`) |
 | 27_wifi_sta | **Working**: Wi-Fi station. Joins a WPA2-PSK (or open) network, 4-way handshake, hardware AES-CCMP, DHCP client, DNS through the router, SDK web page on the Wi-Fi address (`wl_sta.c`, `wpa_crypto.c`). Credentials in git-ignored `wifi_config.h` |

@@ -1,7 +1,7 @@
 build/
 toolchain/
 backups/
-# Realtek Wi-Fi firmware generated from the user's flash backup (tools/extract_wifi_blobs.py)
+# old per-example copies of the Wi-Fi firmware; the committed one is sdk/include/wifi_blobs.inc
 examples/*/wifi_fw.inc
 examples/*/wifi_blobs.inc
 # local Wi-Fi credentials for the STA demo (never committed)

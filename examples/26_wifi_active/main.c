@@ -6,7 +6,7 @@
  * nearby APs.  This is the first on-air transmit: it proves the TX path.
  * Only probe requests go out, addressed to the broadcast address.
  *
- * Tables + firmware: tools/extract_wifi_blobs.py (git-ignored wifi_blobs.inc).
+ * Tables + firmware: sdk/include/wifi_blobs.inc (tools/extract_wifi_blobs.py).
  * Build: python tools/build.py examples/26_wifi_scan   (runs uncached)
  */
 #include "rtl8196c.h"

@@ -121,21 +121,12 @@ def main():
     # Ensure Berry precompiled object headers exist
     ensure_berry_generated(obk_root)
 
-    # Ensure wifi_blobs.inc exists in build/obk (git-ignored)
-    blobs_inc = out / "wifi_blobs.inc"
-    if not blobs_inc.exists():
-        existing_blobs = sorted((ROOT / "examples").glob("*/wifi_blobs.inc"))
-        if existing_blobs:
-            blobs_inc.write_bytes(existing_blobs[0].read_bytes())
-        else:
-            backups = sorted((ROOT / "backups").glob("flash_*.bin"))
-            if backups:
-                subprocess.run([
-                    sys.executable, str(ROOT / "tools" / "extract_wifi_blobs.py"),
-                    str(backups[-1]), "--blobs-inc", str(blobs_inc)
-                ], check=True)
-            else:
-                sys.exit("missing wifi_blobs.inc: run tools/extract_wifi_blobs.py on your flash backup first")
+    # Wi-Fi firmware + register tables, committed in the SDK (found via -I sdk/include)
+    if not (SDK / "include" / "wifi_blobs.inc").exists():
+        sys.exit("missing sdk/include/wifi_blobs.inc: run tools/extract_wifi_blobs.py on a stock flash backup")
+    stale = out / "wifi_blobs.inc"                 # older builds copied it here
+    if stale.exists():
+        stale.unlink()
 
     arch = build.arch_flags("mips1")
     common_flags = build.common_cflags("mips1", "s") + [

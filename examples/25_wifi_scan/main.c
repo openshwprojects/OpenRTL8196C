@@ -8,9 +8,8 @@
  *
  * Bring-up order follows Linux rtlwifi rtl92ce_hw_init: MAC power-on, LLT and
  * DMA rings, firmware, MAC table, baseband (PHY_REG 2T + AGC), RF paths A/B,
- * LC calibration, 20 MHz.  Tables and firmware come from the user's own flash
- * backup: python tools/extract_wifi_blobs.py backups/flash_<date>.bin
- * (generates wifi_blobs.inc here, git-ignored).
+ * LC calibration, 20 MHz.  Tables and firmware come from the stock flash
+ * backup: tools/extract_wifi_blobs.py writes sdk/include/wifi_blobs.inc.
  *
  * Runs uncached (default load 0xA0500000): rings and buffers need no cache care.
  */

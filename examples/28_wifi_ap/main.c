@@ -5,7 +5,7 @@
  * associates it is on the "network" but there is no DHCP or internet.
  *
  * SSID "OpenRTL8196C" on channel 7 (quiet here).  Open system only.
- * Tables + firmware from tools/extract_wifi_blobs.py (git-ignored).
+ * Tables + firmware: sdk/include/wifi_blobs.inc (tools/extract_wifi_blobs.py).
  */
 #include "rtl8196c.h"
 #include "uart.h"

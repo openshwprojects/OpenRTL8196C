@@ -4,7 +4,7 @@
  * Layered: wl_hw_* brings the chip up (MAC + baseband + RF, firmware, TX/RX
  * rings) and moves raw 802.11 frames; the scan / AP / STA logic lives in the
  * examples on top.  Firmware and register tables come from the user's own
- * flash backup via tools/extract_wifi_blobs.py (git-ignored wifi_blobs.inc),
+ * flash backup via tools/extract_wifi_blobs.py (sdk/include/wifi_blobs.inc),
  * so the caller passes them in.
  *
  * Receive only until wl_hw_tx is called; wl_hw_init leaves every TX queue

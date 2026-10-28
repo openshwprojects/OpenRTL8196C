@@ -10,16 +10,15 @@
  *  5. PCIe powered down again
  * The radio is never configured, so nothing is transmitted.
  *
- * The firmware is Realtek's, taken from the user's own flash backup:
- *   python tools/extract_wifi_blobs.py backups/flash_<date>.bin
- * generates wifi_fw.inc here (git-ignored, never committed).
+ * The firmware is Realtek's, taken from the stock flash backup by
+ * tools/extract_wifi_blobs.py into sdk/include/wifi_blobs.inc.
  */
 #include "rtl8196c.h"
 #include "uart.h"
 #include "timer.h"
 #include "pcie.h"
 #include "libc.h"
-#include "wifi_fw.inc"
+#include "wifi_blobs.inc"
 
 /* RTL8192C registers (names as in Linux rtlwifi rtl8192c reg.h) */
 #define REG_SYS_ISO_CTRL   0x0000
