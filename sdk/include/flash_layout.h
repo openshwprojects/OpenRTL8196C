@@ -65,11 +65,11 @@ struct app_header {
     uint32_t seq;            /* higher = newer, set by OTA */
     uint32_t load_addr;      /* RAM destination for payload */
     uint32_t entry;          /* entry point to jump to */
-    uint32_t length;         /* payload bytes immediately following this 56-byte header */
+    uint32_t length;         /* payload bytes immediately following this 52-byte header */
     uint32_t payload_crc32;  /* IEEE CRC32 of payload */
     char     version[16];    /* NUL-terminated string, e.g. git describe / build tag */
     uint32_t build_time;     /* unix timestamp */
-    uint32_t header_crc32;   /* IEEE CRC32 of the first 52 bytes of app_header */
+    uint32_t header_crc32;   /* IEEE CRC32 of the first 48 bytes of app_header */
 };
 
 /* 4. Boot state (0x01E000): append-only 16-byte records in one 4 KB sector (256 records max) */

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Create or inspect RTL8196C firmware images:
-  1. 'rapp' (default): 56-byte RAPP header + payload for Slot A/B & OTA
+  1. 'rapp' (default): 52-byte RAPP header + payload for Slot A/B & OTA
   2. 'cs6c': 16-byte factory loader header + payload + 16-bit zero-sum word for stage-2 (0x10000)
 
 Usage:
@@ -17,7 +17,7 @@ from pathlib import Path
 
 APP_MAGIC = 0x52415050  # 'RAPP'
 APP_HDR_VERSION = 1
-APP_HDR_FMT = ">IIIIIII16sII"  # 56 bytes
+APP_HDR_FMT = ">IIIIIII16sII"  # 52 bytes
 
 
 def cs6c_checksum16(data: bytes) -> int:
